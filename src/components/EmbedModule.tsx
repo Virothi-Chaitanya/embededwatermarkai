@@ -4,8 +4,10 @@ import { Loader2, Download, Lock } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { ImageUpload } from "./ImageUpload";
 import { MetricsPanel } from "./MetricsPanel";
+import { AnalyticsCharts } from "./AnalyticsCharts";
 import { loadImageFromFile, toGrayscale, fromGrayscale, imageDataToDataURL, calculateSSIM } from "@/utils/imageUtils";
 import { hybridEmbed, type HybridEmbedResult } from "@/utils/watermark";
+import { downscaleForProcessing, runAsync } from "@/utils/processing";
 
 export function EmbedModule() {
   const [coverFile, setCoverFile] = useState<File | null>(null);
@@ -14,49 +16,55 @@ export function EmbedModule() {
   const [watermarkPreview, setWatermarkPreview] = useState<string | null>(null);
   const [resultPreview, setResultPreview] = useState<string | null>(null);
   const [processing, setProcessing] = useState(false);
+  const [progress, setProgress] = useState("");
   const [result, setResult] = useState<HybridEmbedResult | null>(null);
   const [ssim, setSsim] = useState<number | undefined>();
 
   const handleCoverSelect = useCallback((file: File) => {
+    if (file.size > 5 * 1024 * 1024) { alert("File too large. Max 5MB."); return; }
     setCoverFile(file);
     setCoverPreview(URL.createObjectURL(file));
-    setResultPreview(null);
-    setResult(null);
+    setResultPreview(null); setResult(null);
   }, []);
 
   const handleWatermarkSelect = useCallback((file: File) => {
+    if (file.size > 5 * 1024 * 1024) { alert("File too large. Max 5MB."); return; }
     setWatermarkFile(file);
     setWatermarkPreview(URL.createObjectURL(file));
-    setResultPreview(null);
-    setResult(null);
+    setResultPreview(null); setResult(null);
   }, []);
 
   const handleEmbed = useCallback(async () => {
     if (!coverFile || !watermarkFile) return;
     setProcessing(true);
+    setProgress("Loading images...");
 
     try {
-      // Use setTimeout to allow UI to update
-      await new Promise(resolve => setTimeout(resolve, 50));
-      
-      const coverData = await loadImageFromFile(coverFile);
-      const wmData = await loadImageFromFile(watermarkFile);
-      
-      const coverGray = toGrayscale(coverData);
-      const wmGray = toGrayscale(wmData);
-      
-      const embedResult = hybridEmbed(coverGray, wmGray, 0.1);
-      
-      const ssimVal = calculateSSIM(coverGray, embedResult.watermarkedImage);
+      const [coverData, wmData] = await Promise.all([
+        loadImageFromFile(coverFile),
+        loadImageFromFile(watermarkFile),
+      ]);
+
+      setProgress("Downscaling for processing...");
+      await new Promise(r => setTimeout(r, 30));
+
+      const coverGray = downscaleForProcessing(toGrayscale(coverData), 256);
+      const wmGray = downscaleForProcessing(toGrayscale(wmData), 128);
+
+      setProgress("Running Genetic Algorithm + DWT + SVD...");
+      const embedResult = await runAsync(() => hybridEmbed(coverGray, wmGray, 0.1));
+
+      setProgress("Computing SSIM...");
+      const ssimVal = await runAsync(() => calculateSSIM(coverGray, embedResult.watermarkedImage));
       setSsim(ssimVal);
-      
+
       const resultImageData = fromGrayscale(embedResult.watermarkedImage);
-      const dataUrl = imageDataToDataURL(resultImageData);
-      
-      setResultPreview(dataUrl);
+      setResultPreview(imageDataToDataURL(resultImageData));
       setResult(embedResult);
+      setProgress("");
     } catch (err) {
       console.error("Embedding error:", err);
+      setProgress("Error during processing");
     } finally {
       setProcessing(false);
     }
@@ -98,21 +106,21 @@ export function EmbedModule() {
         {processing ? (
           <>
             <Loader2 className="w-4 h-4 mr-2 animate-spin" />
-            Processing with GA + DWT + SVD...
+            {progress || "Processing..."}
           </>
         ) : (
           <>
             <Lock className="w-4 h-4 mr-2" />
-            Embed Watermark (Hybrid)
+            Embed Watermark (Hybrid GA + DWT + SVD)
           </>
         )}
       </Button>
 
-      {resultPreview && (
+      {resultPreview && result && (
         <motion.div
           initial={{ opacity: 0, y: 20 }}
           animate={{ opacity: 1, y: 0 }}
-          className="space-y-4"
+          className="space-y-6"
         >
           <div className="p-4 rounded-xl border border-border bg-card">
             <h3 className="text-sm font-semibold font-heading text-foreground mb-3">Watermarked Result</h3>
@@ -127,16 +135,23 @@ export function EmbedModule() {
             </Button>
           </div>
 
-          {result && (
-            <MetricsPanel
-              psnr={result.psnr}
-              ssim={ssim}
-              gaAlpha={result.gaOptimizedAlpha}
-              gaPSNR={result.gaPSNR}
-              blindAlpha={result.blindAlpha}
-              svdAlpha={result.svdAlpha}
-            />
-          )}
+          <MetricsPanel
+            psnr={result.psnr}
+            ssim={ssim}
+            gaAlpha={result.gaOptimizedAlpha}
+            gaPSNR={result.gaPSNR}
+            blindAlpha={result.blindAlpha}
+            svdAlpha={result.svdAlpha}
+            processingTime={result.processingTimeMs}
+            dimensions={result.imageDimensions}
+          />
+
+          <AnalyticsCharts
+            gaHistory={result.gaHistory}
+            dwtEnergy={result.dwtEnergy}
+            dwtEnergyWatermarked={result.dwtEnergyWatermarked}
+            pixelDiffHistogram={result.pixelDiffHistogram}
+          />
         </motion.div>
       )}
     </div>

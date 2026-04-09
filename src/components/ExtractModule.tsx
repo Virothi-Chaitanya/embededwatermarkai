@@ -6,6 +6,7 @@ import { ImageUpload } from "./ImageUpload";
 import { MetricsPanel } from "./MetricsPanel";
 import { loadImageFromFile, toGrayscale, fromGrayscale, imageDataToDataURL, calculatePSNR, calculateSSIM } from "@/utils/imageUtils";
 import { hybridExtract } from "@/utils/watermark";
+import { downscaleForProcessing, runAsync } from "@/utils/processing";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 
@@ -16,7 +17,8 @@ export function ExtractModule() {
   const [originalPreview, setOriginalPreview] = useState<string | null>(null);
   const [resultPreview, setResultPreview] = useState<string | null>(null);
   const [processing, setProcessing] = useState(false);
-  const [metrics, setMetrics] = useState<{ psnr?: number; ssim?: number; nc?: number }>({});
+  const [progress, setProgress] = useState("");
+  const [metrics, setMetrics] = useState<{ psnr?: number; ssim?: number }>({});
   const [blindAlpha, setBlindAlpha] = useState("0.15");
   const [svdAlpha, setSvdAlpha] = useState("0.1");
   const [wmSize, setWmSize] = useState("64");
@@ -24,45 +26,40 @@ export function ExtractModule() {
   const handleExtract = useCallback(async () => {
     if (!watermarkedFile || !originalFile) return;
     setProcessing(true);
+    setProgress("Loading images...");
 
     try {
-      await new Promise(resolve => setTimeout(resolve, 50));
-      
-      const wmData = await loadImageFromFile(watermarkedFile);
-      const origData = await loadImageFromFile(originalFile);
-      
-      const wmGray = toGrayscale(wmData);
-      const origGray = toGrayscale(origData);
+      const [wmData, origData] = await Promise.all([
+        loadImageFromFile(watermarkedFile),
+        loadImageFromFile(originalFile),
+      ]);
+
+      setProgress("Processing...");
+      await new Promise(r => setTimeout(r, 30));
+
+      const wmGray = downscaleForProcessing(toGrayscale(wmData), 256);
+      const origGray = downscaleForProcessing(toGrayscale(origData), 256);
       const size = parseInt(wmSize) || 64;
-      
-      const extractResult = hybridExtract(
-        wmGray, origGray,
-        parseFloat(blindAlpha) || 0.15,
-        parseFloat(svdAlpha) || 0.1,
-        size, size
+
+      setProgress("Extracting watermark (DWT-SVD + Blind)...");
+      const extractResult = await runAsync(() =>
+        hybridExtract(wmGray, origGray, parseFloat(blindAlpha) || 0.15, parseFloat(svdAlpha) || 0.1, size, size)
       );
-      
-      const resultImageData = fromGrayscale(extractResult.extractedWatermark);
-      setResultPreview(imageDataToDataURL(resultImageData));
-      
-      setMetrics({
-        psnr: calculatePSNR(origGray, wmGray),
-        ssim: calculateSSIM(origGray, wmGray),
-      });
+
+      setResultPreview(imageDataToDataURL(fromGrayscale(extractResult.extractedWatermark)));
+
+      setProgress("Computing metrics...");
+      const psnr = await runAsync(() => calculatePSNR(origGray, wmGray));
+      const ssim = await runAsync(() => calculateSSIM(origGray, wmGray));
+      setMetrics({ psnr, ssim });
+      setProgress("");
     } catch (err) {
       console.error("Extraction error:", err);
+      setProgress("Error during extraction");
     } finally {
       setProcessing(false);
     }
   }, [watermarkedFile, originalFile, blindAlpha, svdAlpha, wmSize]);
-
-  const handleDownload = useCallback(() => {
-    if (!resultPreview) return;
-    const a = document.createElement("a");
-    a.href = resultPreview;
-    a.download = "extracted_watermark.png";
-    a.click();
-  }, [resultPreview]);
 
   return (
     <div className="space-y-6">
@@ -107,7 +104,7 @@ export function ExtractModule() {
         {processing ? (
           <>
             <Loader2 className="w-4 h-4 mr-2 animate-spin" />
-            Extracting watermark...
+            {progress || "Extracting..."}
           </>
         ) : (
           <>
@@ -127,7 +124,13 @@ export function ExtractModule() {
             <h3 className="text-sm font-semibold font-heading text-foreground mb-3">Extracted Watermark</h3>
             <img src={resultPreview} alt="Extracted watermark" className="w-full rounded-lg border border-border bg-muted" />
             <Button
-              onClick={handleDownload}
+              onClick={() => {
+                if (!resultPreview) return;
+                const a = document.createElement("a");
+                a.href = resultPreview;
+                a.download = "extracted_watermark.png";
+                a.click();
+              }}
               variant="outline"
               className="w-full mt-3 border-accent/30 text-accent hover:bg-accent/10"
             >
@@ -136,7 +139,7 @@ export function ExtractModule() {
             </Button>
           </div>
 
-          <MetricsPanel psnr={metrics.psnr} ssim={metrics.ssim} nc={metrics.nc} />
+          <MetricsPanel psnr={metrics.psnr} ssim={metrics.ssim} />
         </motion.div>
       )}
     </div>
