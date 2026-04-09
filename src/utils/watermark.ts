@@ -1,74 +1,83 @@
-import { dwt2, idwt2 } from "./dwt";
+import { dwt2Level, idwt2Level } from "./dwt";
 import { svd, svdReconstruct } from "./svd";
-import { resizeGray, binarize, calculatePSNR } from "./imageUtils";
+import { resizeGray, calculatePSNR, calculateSSIM, calculateNCC, calculateMSE, clampImage } from "./imageUtils";
 
-// ========== BLIND DWT EMBEDDING ==========
+// ========== EMBEDDING (2-Level DWT + SVD) ==========
 
-export function blindDwtEmbed(
+export interface EmbedParams {
+  coverU: number[][];
+  coverV: number[][];
+  wmU: number[][];
+  wmV: number[][];
+  alpha: number;
+  wmRows: number;
+  wmCols: number;
+}
+
+export interface EmbedResult {
+  watermarkedImage: number[][];
+  params: EmbedParams;
+  psnr: number;
+  ssim: number;
+  mse: number;
+  alpha: number;
+  processingTimeMs: number;
+  imageDimensions: { width: number; height: number };
+  gaHistory: GAGenerationData[];
+  gaOptimizedAlpha: number;
+  gaPSNR: number;
+  alphaSweep: AlphaSweepPoint[];
+  dwtBands: DWTBandData;
+  svdData: SVDVisualizationData;
+}
+
+export interface DWTBandData {
+  LL: number[][];
+  LH: number[][];
+  HL: number[][];
+  HH: number[][];
+  LL2: number[][];
+}
+
+export interface SVDVisualizationData {
+  coverSingularValues: number[];
+  wmSingularValues: number[];
+  modifiedSingularValues: number[];
+}
+
+export interface AlphaSweepPoint {
+  alpha: number;
+  psnr: number;
+  ssim: number;
+  ncc: number;
+  mse: number;
+}
+
+function embedWithAlpha(
   coverGray: number[][],
   watermarkGray: number[][],
   alpha: number
-): number[][] {
-  const coeffs = dwt2(coverGray);
-  const wmH = coeffs.LL.length;
-  const wmW = coeffs.LL[0].length;
-  const wmResized = binarize(resizeGray(watermarkGray, wmW, wmH));
+): { watermarked: number[][]; params: EmbedParams; svdData: SVDVisualizationData } {
+  const coeffs = dwt2Level(coverGray);
+  const ll2 = coeffs.LL2;
+  const h = ll2.length;
+  const w = ll2[0].length;
 
-  for (let y = 0; y < wmH; y++) {
-    for (let x = 0; x < wmW; x++) {
-      const wmBit = wmResized[y][x] > 128 ? 1 : 0;
-      coeffs.LL[y][x] += alpha * (wmBit * 2 - 1);
-    }
-  }
-  return idwt2(coeffs);
-}
+  // SVD on LL2 sub-band
+  const coverSvd = svd(ll2);
 
-// ========== BLIND DWT EXTRACTION ==========
-
-export function blindDwtExtract(
-  watermarkedGray: number[][],
-  originalGray: number[][],
-  _alpha: number,
-  wmWidth: number,
-  wmHeight: number
-): number[][] {
-  const wmCoeffs = dwt2(watermarkedGray);
-  const origCoeffs = dwt2(originalGray);
-  const h = wmCoeffs.LL.length;
-  const w = wmCoeffs.LL[0].length;
-
-  const extracted: number[][] = [];
-  for (let y = 0; y < h; y++) {
-    extracted[y] = [];
-    for (let x = 0; x < w; x++) {
-      const diff = wmCoeffs.LL[y][x] - origCoeffs.LL[y][x];
-      extracted[y][x] = diff > 0 ? 255 : 0;
-    }
-  }
-  return resizeGray(extracted, wmWidth, wmHeight);
-}
-
-// ========== NON-BLIND DWT-SVD EMBEDDING ==========
-
-export function dwtSvdEmbed(
-  coverGray: number[][],
-  watermarkGray: number[][],
-  alpha: number
-): { watermarked: number[][] } {
-  const coeffs = dwt2(coverGray);
-  const llH = coeffs.LL.length;
-  const llW = coeffs.LL[0].length;
-
-  const coverSvd = svd(coeffs.LL);
-  const wmResized = resizeGray(watermarkGray, llW, llH);
+  // Resize & SVD on watermark
+  const wmResized = resizeGray(watermarkGray, w, h);
   const wmSvd = svd(wmResized);
 
+  // Modify singular values: S' = S + alpha * Sw
   const modifiedS = coverSvd.S.map((s, i) => {
-    const wmS = i < wmSvd.S.length ? wmSvd.S[i] : 0;
-    return s + alpha * wmS;
+    const sw = i < wmSvd.S.length ? wmSvd.S[i] : 0;
+    return s + alpha * sw;
   });
 
-  coeffs.LL = svdReconstruct({
+  // Reconstruct LL2' = U * S' * V^T
+  coeffs.LL2 = svdReconstruct({
     U: coverSvd.U,
     S: modifiedS,
     V: coverSvd.V,
@@ -76,29 +85,57 @@ export function dwtSvdEmbed(
     cols: coverSvd.cols,
   });
 
-  return { watermarked: idwt2(coeffs) };
+  const watermarked = clampImage(idwt2Level(coeffs));
+
+  return {
+    watermarked,
+    params: {
+      coverU: coverSvd.U,
+      coverV: coverSvd.V,
+      wmU: wmSvd.U,
+      wmV: wmSvd.V,
+      alpha,
+      wmRows: wmSvd.rows,
+      wmCols: wmSvd.cols,
+    },
+    svdData: {
+      coverSingularValues: coverSvd.S.slice(0, 20),
+      wmSingularValues: wmSvd.S.slice(0, 20),
+      modifiedSingularValues: modifiedS.slice(0, 20),
+    },
+  };
 }
 
-// ========== NON-BLIND DWT-SVD EXTRACTION ==========
+// ========== EXTRACTION (2-Level DWT + SVD) ==========
 
-export function dwtSvdExtract(
+export interface ExtractResult {
+  extractedWatermark: number[][];
+  psnr: number;
+  ssim: number;
+  ncc: number;
+  mse: number;
+}
+
+export function extractWatermark(
   watermarkedGray: number[][],
   originalGray: number[][],
   alpha: number,
   wmWidth: number,
   wmHeight: number
-): number[][] {
-  const wmCoeffs = dwt2(watermarkedGray);
-  const origCoeffs = dwt2(originalGray);
+): ExtractResult {
+  const wmCoeffs = dwt2Level(watermarkedGray);
+  const origCoeffs = dwt2Level(originalGray);
 
-  const wmSvd = svd(wmCoeffs.LL);
-  const origSvd = svd(origCoeffs.LL);
+  const wmSvd = svd(wmCoeffs.LL2);
+  const origSvd = svd(origCoeffs.LL2);
 
+  // Extract: Sw' = (Sw - S) / alpha
   const extractedS = wmSvd.S.map((s, i) => {
     const origS = i < origSvd.S.length ? origSvd.S[i] : 0;
     return Math.max(0, (s - origS) / alpha);
   });
 
+  // Reconstruct watermark using extracted singular values
   const extracted = svdReconstruct({
     U: wmSvd.U,
     S: extractedS,
@@ -107,51 +144,90 @@ export function dwtSvdExtract(
     cols: wmSvd.cols,
   });
 
-  return resizeGray(
-    extracted.map(row => row.map(v => Math.max(0, Math.min(255, v)))),
-    wmWidth,
-    wmHeight
+  // Normalize to 0-255 range
+  let minV = Infinity, maxV = -Infinity;
+  for (const row of extracted) {
+    for (const v of row) {
+      if (v < minV) minV = v;
+      if (v > maxV) maxV = v;
+    }
+  }
+  const range = maxV - minV || 1;
+  const normalized = extracted.map(row =>
+    row.map(v => Math.max(0, Math.min(255, ((v - minV) / range) * 255)))
   );
+
+  const resized = resizeGray(normalized, wmWidth, wmHeight);
+
+  // Compute metrics against a reference (binarized original watermark proxy)
+  const origWmProxy = resizeGray(originalGray, wmWidth, wmHeight);
+
+  return {
+    extractedWatermark: resized,
+    psnr: calculatePSNR(origWmProxy, resized),
+    ssim: calculateSSIM(origWmProxy, resized),
+    ncc: calculateNCC(origWmProxy, resized),
+    mse: calculateMSE(origWmProxy, resized),
+  };
 }
 
-// ========== GENETIC ALGORITHM WITH TRACKING ==========
+// ========== GENETIC ALGORITHM ==========
 
 export interface GAGenerationData {
   generation: number;
   bestFitness: number;
   avgFitness: number;
   bestAlpha: number;
+  bestPSNR: number;
+  bestSSIM: number;
+  bestNCC: number;
 }
 
 export interface GAResult {
   bestAlpha: number;
   bestPSNR: number;
+  bestSSIM: number;
+  bestNCC: number;
   history: GAGenerationData[];
 }
 
 interface GAIndividual {
   alpha: number;
   fitness: number;
+  psnr: number;
+  ssim: number;
+  ncc: number;
 }
 
 export function geneticAlgorithmOptimize(
   coverGray: number[][],
   watermarkGray: number[][],
-  populationSize: number = 10,
-  generations: number = 6
+  populationSize: number = 20,
+  generations: number = 30
 ): GAResult {
   let population: GAIndividual[] = [];
   for (let i = 0; i < populationSize; i++) {
-    population.push({ alpha: 0.01 + Math.random() * 0.49, fitness: 0 });
+    population.push({ alpha: 0.01 + Math.random() * 0.49, fitness: 0, psnr: 0, ssim: 0, ncc: 0 });
   }
 
-  const evaluate = (ind: GAIndividual) => {
-    const watermarked = blindDwtEmbed(coverGray, watermarkGray, ind.alpha);
-    ind.fitness = calculatePSNR(coverGray, watermarked);
-    return ind;
+  const evaluate = (ind: GAIndividual): GAIndividual => {
+    const { watermarked } = embedWithAlpha(coverGray, watermarkGray, ind.alpha);
+    const psnr = calculatePSNR(coverGray, watermarked);
+    const ssim = calculateSSIM(coverGray, watermarked);
+
+    // Quick extraction for NCC
+    const extracted = extractWatermark(watermarked, coverGray, ind.alpha, 64, 64);
+    const ncc = extracted.ncc;
+
+    // Multi-objective fitness: weighted combination
+    // Normalize PSNR (typical range 20-60), SSIM (0-1), NCC (0-1)
+    const psnrNorm = Math.min(psnr / 60, 1);
+    const fitness = 0.4 * psnrNorm + 0.3 * ssim + 0.3 * ncc;
+
+    return { ...ind, fitness, psnr, ssim, ncc };
   };
 
-  let best: GAIndividual = { alpha: 0.1, fitness: 0 };
+  let best: GAIndividual = { alpha: 0.1, fitness: 0, psnr: 0, ssim: 0, ncc: 0 };
   const history: GAGenerationData[] = [];
 
   for (let gen = 0; gen < generations; gen++) {
@@ -168,25 +244,60 @@ export function geneticAlgorithmOptimize(
       bestFitness: population[0].fitness,
       avgFitness,
       bestAlpha: population[0].alpha,
+      bestPSNR: population[0].psnr,
+      bestSSIM: population[0].ssim,
+      bestNCC: population[0].ncc,
     });
 
+    // Selection: top 50%
     const survivors = population.slice(0, Math.ceil(populationSize / 2));
     const newPop: GAIndividual[] = [...survivors];
+
     while (newPop.length < populationSize) {
       const p1 = survivors[Math.floor(Math.random() * survivors.length)];
       const p2 = survivors[Math.floor(Math.random() * survivors.length)];
       let childAlpha = (p1.alpha + p2.alpha) / 2;
-      if (Math.random() < 0.15) childAlpha += (Math.random() - 0.5) * 0.1;
+
+      // Mutation
+      if (Math.random() < 0.2) {
+        childAlpha += (Math.random() - 0.5) * 0.1;
+      }
       childAlpha = Math.max(0.01, Math.min(0.5, childAlpha));
-      newPop.push({ alpha: childAlpha, fitness: 0 });
+      newPop.push({ alpha: childAlpha, fitness: 0, psnr: 0, ssim: 0, ncc: 0 });
     }
     population = newPop;
   }
 
-  return { bestAlpha: best.alpha, bestPSNR: best.fitness, history };
+  return {
+    bestAlpha: best.alpha,
+    bestPSNR: best.psnr,
+    bestSSIM: best.ssim,
+    bestNCC: best.ncc,
+    history,
+  };
 }
 
-// ========== DWT COEFFICIENT ENERGY (for visualization) ==========
+// ========== ALPHA SWEEP (for PSNR/SSIM/NCC vs Alpha charts) ==========
+
+export function sweepAlpha(
+  coverGray: number[][],
+  watermarkGray: number[][],
+  steps: number = 10
+): AlphaSweepPoint[] {
+  const points: AlphaSweepPoint[] = [];
+  for (let i = 1; i <= steps; i++) {
+    const alpha = (i / steps) * 0.5;
+    const { watermarked } = embedWithAlpha(coverGray, watermarkGray, alpha);
+    const psnr = calculatePSNR(coverGray, watermarked);
+    const ssim = calculateSSIM(coverGray, watermarked);
+    const mse = calculateMSE(coverGray, watermarked);
+    const ext = extractWatermark(watermarked, coverGray, alpha, 64, 64);
+    points.push({ alpha: Math.round(alpha * 1000) / 1000, psnr, ssim, ncc: ext.ncc, mse });
+  }
+  return points;
+}
+
+// ========== DWT BAND ENERGY ==========
 
 export interface DWTEnergyData {
   subband: string;
@@ -195,20 +306,23 @@ export interface DWTEnergyData {
 }
 
 export function getDWTEnergy(gray: number[][]): DWTEnergyData[] {
-  const coeffs = dwt2(gray);
+  const coeffs = dwt2Level(gray);
   const calcEnergy = (band: number[][]) => {
     let e = 0;
     for (const row of band) for (const v of row) e += v * v;
     return e;
   };
 
-  const energies = {
-    LL: calcEnergy(coeffs.LL),
-    LH: calcEnergy(coeffs.LH),
-    HL: calcEnergy(coeffs.HL),
-    HH: calcEnergy(coeffs.HH),
+  const energies: Record<string, number> = {
+    LL2: calcEnergy(coeffs.LL2),
+    LH2: calcEnergy(coeffs.LH2),
+    HL2: calcEnergy(coeffs.HL2),
+    HH2: calcEnergy(coeffs.HH2),
+    LH1: calcEnergy(coeffs.LH1),
+    HL1: calcEnergy(coeffs.HL1),
+    HH1: calcEnergy(coeffs.HH1),
   };
-  const total = energies.LL + energies.LH + energies.HL + energies.HH;
+  const total = Object.values(energies).reduce((a, b) => a + b, 0);
 
   return Object.entries(energies).map(([subband, energy]) => ({
     subband,
@@ -245,89 +359,57 @@ export function getPixelDiffHistogram(original: number[][], watermarked: number[
   return Object.entries(bins).map(([range, count]) => ({ range, count }));
 }
 
-// ========== HYBRID EMBEDDING ==========
-
-export interface HybridEmbedResult {
-  watermarkedImage: number[][];
-  blindAlpha: number;
-  svdAlpha: number;
-  psnr: number;
-  gaOptimizedAlpha: number;
-  gaPSNR: number;
-  gaHistory: GAGenerationData[];
-  dwtEnergy: DWTEnergyData[];
-  dwtEnergyWatermarked: DWTEnergyData[];
-  pixelDiffHistogram: HistogramBin[];
-  processingTimeMs: number;
-  imageDimensions: { width: number; height: number };
-}
+// ========== MAIN EMBED FUNCTION ==========
 
 export function hybridEmbed(
   coverGray: number[][],
   watermarkGray: number[][],
-  svdAlpha: number = 0.1
-): HybridEmbedResult {
+  userAlpha?: number
+): EmbedResult {
   const startTime = performance.now();
 
-  const gaResult = geneticAlgorithmOptimize(coverGray, watermarkGray);
-  const blindWatermarked = blindDwtEmbed(coverGray, watermarkGray, gaResult.bestAlpha);
-  const { watermarked } = dwtSvdEmbed(blindWatermarked, watermarkGray, svdAlpha);
-  const clamped = watermarked.map(row => row.map(v => Math.max(0, Math.min(255, v))));
+  // GA optimization
+  const gaResult = geneticAlgorithmOptimize(coverGray, watermarkGray, 20, 30);
+  const alpha = userAlpha ?? gaResult.bestAlpha;
 
-  const psnr = calculatePSNR(coverGray, clamped);
-  const dwtEnergy = getDWTEnergy(coverGray);
-  const dwtEnergyWatermarked = getDWTEnergy(clamped);
-  const pixelDiffHistogram = getPixelDiffHistogram(coverGray, clamped);
+  // Embed with optimal alpha
+  const { watermarked, params, svdData } = embedWithAlpha(coverGray, watermarkGray, alpha);
+
+  // Metrics
+  const psnr = calculatePSNR(coverGray, watermarked);
+  const ssim = calculateSSIM(coverGray, watermarked);
+  const mse = calculateMSE(coverGray, watermarked);
+
+  // Alpha sweep for charts
+  const alphaSweep = sweepAlpha(coverGray, watermarkGray, 10);
+
+  // DWT band visualization data
+  const coeffs = dwt2Level(coverGray);
+  const dwtBands: DWTBandData = {
+    LL: coeffs.LL2, // Show level-2 LL
+    LH: coeffs.LH1,
+    HL: coeffs.HL1,
+    HH: coeffs.HH1,
+    LL2: coeffs.LL2,
+  };
 
   return {
-    watermarkedImage: clamped,
-    blindAlpha: gaResult.bestAlpha,
-    svdAlpha,
+    watermarkedImage: watermarked,
+    params,
     psnr,
-    gaOptimizedAlpha: gaResult.bestAlpha,
-    gaPSNR: gaResult.bestPSNR,
-    gaHistory: gaResult.history,
-    dwtEnergy,
-    dwtEnergyWatermarked,
-    pixelDiffHistogram,
+    ssim,
+    mse,
+    alpha,
     processingTimeMs: performance.now() - startTime,
     imageDimensions: { width: coverGray[0].length, height: coverGray.length },
+    gaHistory: gaResult.history,
+    gaOptimizedAlpha: gaResult.bestAlpha,
+    gaPSNR: gaResult.bestPSNR,
+    alphaSweep,
+    dwtBands,
+    svdData,
   };
 }
 
-// ========== HYBRID EXTRACTION ==========
-
-export interface HybridExtractResult {
-  extractedWatermark: number[][];
-  psnr: number;
-}
-
-export function hybridExtract(
-  watermarkedGray: number[][],
-  originalGray: number[][],
-  blindAlpha: number,
-  svdAlpha: number,
-  wmWidth: number,
-  wmHeight: number
-): HybridExtractResult {
-  const svdExtracted = dwtSvdExtract(watermarkedGray, originalGray, svdAlpha, wmWidth, wmHeight);
-  const blindExtracted = blindDwtExtract(watermarkedGray, originalGray, blindAlpha, wmWidth, wmHeight);
-
-  const combined: number[][] = [];
-  for (let y = 0; y < wmHeight; y++) {
-    combined[y] = [];
-    for (let x = 0; x < wmWidth; x++) {
-      const svdVal = y < svdExtracted.length && x < svdExtracted[0].length ? svdExtracted[y][x] : 0;
-      const blindVal = y < blindExtracted.length && x < blindExtracted[0].length ? blindExtracted[y][x] : 0;
-      combined[y][x] = (svdVal + blindVal) / 2;
-    }
-  }
-
-  return {
-    extractedWatermark: binarize(combined),
-    psnr: calculatePSNR(
-      binarize(resizeGray(originalGray, wmWidth, wmHeight)),
-      binarize(combined)
-    ),
-  };
-}
+// Re-export for extraction module
+export { extractWatermark as hybridExtract };

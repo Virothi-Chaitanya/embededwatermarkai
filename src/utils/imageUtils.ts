@@ -57,17 +57,29 @@ export function imageDataToDataURL(imageData: ImageData): string {
   return canvas.toDataURL("image/png");
 }
 
-// Resize grayscale image to target dimensions
+// Bilinear interpolation resize for better quality
 export function resizeGray(gray: number[][], targetW: number, targetH: number): number[][] {
   const srcH = gray.length;
   const srcW = gray[0].length;
+  if (srcH === targetH && srcW === targetW) return gray.map(r => [...r]);
+  
   const result: number[][] = [];
   for (let y = 0; y < targetH; y++) {
     result[y] = [];
     for (let x = 0; x < targetW; x++) {
-      const srcX = Math.min(Math.floor((x / targetW) * srcW), srcW - 1);
-      const srcY = Math.min(Math.floor((y / targetH) * srcH), srcH - 1);
-      result[y][x] = gray[srcY][srcX];
+      const srcX = (x / targetW) * srcW;
+      const srcY = (y / targetH) * srcH;
+      const x0 = Math.floor(srcX);
+      const y0 = Math.floor(srcY);
+      const x1 = Math.min(x0 + 1, srcW - 1);
+      const y1 = Math.min(y0 + 1, srcH - 1);
+      const fx = srcX - x0;
+      const fy = srcY - y0;
+      result[y][x] =
+        gray[y0][x0] * (1 - fx) * (1 - fy) +
+        gray[y0][x1] * fx * (1 - fy) +
+        gray[y1][x0] * (1 - fx) * fy +
+        gray[y1][x1] * fx * fy;
     }
   }
   return result;
@@ -78,8 +90,8 @@ export function binarize(gray: number[][]): number[][] {
   return gray.map(row => row.map(v => (v > 128 ? 255 : 0)));
 }
 
-// Calculate PSNR between two grayscale images
-export function calculatePSNR(original: number[][], modified: number[][]): number {
+// Calculate MSE
+export function calculateMSE(original: number[][], modified: number[][]): number {
   const h = original.length;
   const w = original[0].length;
   let mse = 0;
@@ -89,17 +101,22 @@ export function calculatePSNR(original: number[][], modified: number[][]): numbe
       mse += diff * diff;
     }
   }
-  mse /= h * w;
+  return mse / (h * w);
+}
+
+// Calculate PSNR
+export function calculatePSNR(original: number[][], modified: number[][]): number {
+  const mse = calculateMSE(original, modified);
   if (mse === 0) return Infinity;
   return 10 * Math.log10((255 * 255) / mse);
 }
 
-// Calculate SSIM between two grayscale images
+// Calculate SSIM
 export function calculateSSIM(original: number[][], modified: number[][]): number {
   const h = original.length;
   const w = original[0].length;
   const n = h * w;
-  
+
   let meanX = 0, meanY = 0;
   for (let y = 0; y < h; y++) {
     for (let x = 0; x < w; x++) {
@@ -109,7 +126,7 @@ export function calculateSSIM(original: number[][], modified: number[][]): numbe
   }
   meanX /= n;
   meanY /= n;
-  
+
   let varX = 0, varY = 0, covXY = 0;
   for (let y = 0; y < h; y++) {
     for (let x = 0; x < w; x++) {
@@ -123,26 +140,45 @@ export function calculateSSIM(original: number[][], modified: number[][]): numbe
   varX /= n;
   varY /= n;
   covXY /= n;
-  
+
   const C1 = (0.01 * 255) ** 2;
   const C2 = (0.03 * 255) ** 2;
-  
+
   return ((2 * meanX * meanY + C1) * (2 * covXY + C2)) /
          ((meanX ** 2 + meanY ** 2 + C1) * (varX + varY + C2));
 }
 
-// Calculate Normalized Correlation between two binary watermarks
-export function calculateNC(original: number[][], extracted: number[][]): number {
+// Calculate NCC (Normalized Cross-Correlation)
+export function calculateNCC(original: number[][], extracted: number[][]): number {
   const h = Math.min(original.length, extracted.length);
   const w = Math.min(original[0].length, extracted[0].length);
-  let num = 0, den = 0;
+  
+  let meanA = 0, meanB = 0;
+  const n = h * w;
   for (let y = 0; y < h; y++) {
     for (let x = 0; x < w; x++) {
-      const a = original[y][x] > 128 ? 1 : 0;
-      const b = extracted[y][x] > 128 ? 1 : 0;
-      num += a * b;
-      den += a * a;
+      meanA += original[y][x];
+      meanB += extracted[y][x];
     }
   }
+  meanA /= n;
+  meanB /= n;
+  
+  let num = 0, denA = 0, denB = 0;
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      const a = original[y][x] - meanA;
+      const b = extracted[y][x] - meanB;
+      num += a * b;
+      denA += a * a;
+      denB += b * b;
+    }
+  }
+  const den = Math.sqrt(denA * denB);
   return den === 0 ? 0 : num / den;
+}
+
+// Clamp image values to 0-255
+export function clampImage(gray: number[][]): number[][] {
+  return gray.map(row => row.map(v => Math.max(0, Math.min(255, v))));
 }
