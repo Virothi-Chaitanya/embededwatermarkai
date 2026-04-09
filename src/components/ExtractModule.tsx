@@ -4,7 +4,7 @@ import { Loader2, Unlock, Download } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { ImageUpload } from "./ImageUpload";
 import { MetricsPanel } from "./MetricsPanel";
-import { loadImageFromFile, toGrayscale, fromGrayscale, imageDataToDataURL, calculatePSNR, calculateSSIM, calculateNC, binarize, resizeGray } from "@/utils/imageUtils";
+import { loadImageFromFile, toGrayscale, fromGrayscale, imageDataToDataURL, calculatePSNR, calculateSSIM } from "@/utils/imageUtils";
 import { hybridExtract } from "@/utils/watermark";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
