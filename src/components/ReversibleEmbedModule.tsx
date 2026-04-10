@@ -1,11 +1,11 @@
 import { useState, useCallback } from "react";
 import { motion } from "framer-motion";
-import { Loader2, Lock, Download, CheckCircle2, AlertTriangle, Sparkles } from "lucide-react";
+import { Loader2, Lock, Download, CheckCircle2, Sparkles } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { ImageUpload } from "./ImageUpload";
-import { loadImageFromFile, toGrayscale, fromGrayscale, imageDataToDataURL, resizeGray } from "@/utils/imageUtils";
+import { loadImageFromFile, imageDataToDataURL } from "@/utils/imageUtils";
 import { reversibleEmbed } from "@/utils/reversible";
-import { downscaleForProcessing, runAsync } from "@/utils/processing";
+import { runAsync } from "@/utils/processing";
 import { Slider } from "@/components/ui/slider";
 import { Label } from "@/components/ui/label";
 
@@ -22,8 +22,7 @@ export function ReversibleEmbedModule({ onComplete }: Props) {
   const [processing, setProcessing] = useState(false);
   const [progress, setProgress] = useState("");
   const [result, setResult] = useState<any>(null);
-  const [alpha, setAlpha] = useState(0.1);
-  const [resolution, setResolution] = useState(256);
+  const [alpha, setAlpha] = useState(0.05);
 
   const handleEmbed = useCallback(async () => {
     if (!coverFile || !wmFile) return;
@@ -36,41 +35,37 @@ export function ReversibleEmbedModule({ onComplete }: Props) {
         loadImageFromFile(wmFile),
       ]);
 
-      setProgress("Converting to grayscale...");
+      setProgress("Embedding watermark (DWT-SVD + LSB)...");
       await new Promise(r => setTimeout(r, 30));
 
-      const coverGray = downscaleForProcessing(toGrayscale(coverData), resolution);
-      const wmGray = downscaleForProcessing(toGrayscale(wmData), 64);
-
-      setProgress("Embedding watermark (DWT-SVD + LSB)...");
-      const embedResult = await runAsync(() => reversibleEmbed(coverGray, wmGray, alpha));
+      const embedResult = await runAsync(() =>
+        reversibleEmbed(coverData, wmData, alpha)
+      );
 
       setResult(embedResult);
-      setResultPreview(imageDataToDataURL(fromGrayscale(embedResult.watermarkedImage)));
-
-      setProgress("Computing metrics...");
-      await new Promise(r => setTimeout(r, 20));
+      setResultPreview(imageDataToDataURL(embedResult.watermarkedImageData));
+      setProgress("");
 
       onComplete?.({
         ...embedResult,
-        coverGray,
-        wmGray,
+        coverImageData: coverData,
+        watermarkImageData: wmData,
       });
 
-      setProgress("");
+      onComplete?.(embedResult);
     } catch (err) {
       console.error("Embed error:", err);
       setProgress("Error during processing");
     } finally {
       setProcessing(false);
     }
-  }, [coverFile, wmFile, alpha, resolution, onComplete]);
+  }, [coverFile, wmFile, alpha, onComplete]);
 
   const handleDownload = () => {
     if (!resultPreview) return;
     const a = document.createElement("a");
     a.href = resultPreview;
-    a.download = "watermarked_reversible.png";
+    a.download = "watermarked_image.png";
     a.click();
   };
 
@@ -86,14 +81,14 @@ export function ReversibleEmbedModule({ onComplete }: Props) {
           <div className="space-y-4">
             <ImageUpload
               label="Original Image"
-              description="The image to protect and recover later"
+              description="The image to protect (output will look identical)"
               onFileSelect={(f) => { setCoverFile(f); setCoverPreview(URL.createObjectURL(f)); setResultPreview(null); setResult(null); }}
               preview={coverPreview}
               onClear={() => { setCoverFile(null); setCoverPreview(null); setResultPreview(null); setResult(null); }}
             />
             <ImageUpload
               label="Watermark Image"
-              description="Logo or pattern to embed"
+              description="Logo or pattern to embed secretly"
               onFileSelect={(f) => { setWmFile(f); setWmPreview(URL.createObjectURL(f)); setResultPreview(null); setResult(null); }}
               preview={wmPreview}
               onClear={() => { setWmFile(null); setWmPreview(null); setResultPreview(null); setResult(null); }}
@@ -106,23 +101,13 @@ export function ReversibleEmbedModule({ onComplete }: Props) {
             <Sparkles className="w-4 h-4 text-accent" />
             Parameters
           </h3>
-          <div className="space-y-4">
-            <div>
-              <Label className="text-xs text-muted-foreground mb-2 block">
-                Alpha (α): <span className="text-accent font-mono">{alpha.toFixed(2)}</span>
-              </Label>
-              <Slider value={[alpha * 100]} onValueChange={([v]) => setAlpha(v / 100)}
-                min={1} max={50} step={1} className="mt-1" />
-              <p className="text-[10px] text-muted-foreground mt-1">Embedding strength — lower = more invisible, higher = more robust</p>
-            </div>
-            <div>
-              <Label className="text-xs text-muted-foreground mb-2 block">
-                Resolution: <span className="text-accent font-mono">{resolution}px</span>
-              </Label>
-              <Slider value={[resolution]} onValueChange={([v]) => setResolution(v)}
-                min={128} max={512} step={64} className="mt-1" />
-              <p className="text-[10px] text-muted-foreground mt-1">Processing resolution — higher = better quality but slower</p>
-            </div>
+          <div>
+            <Label className="text-xs text-muted-foreground mb-2 block">
+              Alpha (α): <span className="text-accent font-mono">{alpha.toFixed(3)}</span>
+            </Label>
+            <Slider value={[alpha * 1000]} onValueChange={([v]) => setAlpha(v / 1000)}
+              min={10} max={200} step={5} className="mt-1" />
+            <p className="text-[10px] text-muted-foreground mt-1">Lower = more invisible, Higher = more robust</p>
           </div>
         </div>
 
@@ -135,7 +120,7 @@ export function ReversibleEmbedModule({ onComplete }: Props) {
           {processing ? (
             <><Loader2 className="w-4 h-4 mr-2 animate-spin" />{progress || "Processing..."}</>
           ) : (
-            <><Lock className="w-4 h-4 mr-2" />Embed & Encode (DWT-SVD + LSB)</>
+            <><Lock className="w-4 h-4 mr-2" />Embed Watermark</>
           )}
         </Button>
       </div>
@@ -165,15 +150,14 @@ export function ReversibleEmbedModule({ onComplete }: Props) {
             <div className="glass-card p-5">
               <h3 className="text-sm font-semibold font-heading text-foreground mb-3 flex items-center gap-2">
                 <CheckCircle2 className="w-4 h-4 text-success" />
-                Watermarked Image (Contains Both)
+                Watermarked Image (Looks Identical to Original)
               </h3>
               <img src={resultPreview} alt="Watermarked" className="w-full rounded-xl border border-border bg-muted" />
               <Button onClick={handleDownload} variant="outline" className="w-full mt-3 border-primary/30 text-primary hover:bg-primary/10">
-                <Download className="w-4 h-4 mr-2" /> Download Protected Image
+                <Download className="w-4 h-4 mr-2" /> Download Watermarked Image
               </Button>
             </div>
 
-            {/* Quick Metrics */}
             <div className="grid grid-cols-2 gap-3">
               <MetricCard label="PSNR" value={result.psnr?.toFixed(2)} unit="dB" good={result.psnr > 30} />
               <MetricCard label="SSIM" value={result.ssim?.toFixed(4)} good={result.ssim > 0.9} />
