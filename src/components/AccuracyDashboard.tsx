@@ -67,7 +67,7 @@ export function AccuracyDashboard({ data }: Props) {
   };
 
   useEffect(() => {
-    if (data?.coverGray && sweepData.length === 0) {
+    if (data?.coverImageData && sweepData.length === 0) {
       computeCharts();
     }
   }, [data]);
