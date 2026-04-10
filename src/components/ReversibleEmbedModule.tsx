@@ -46,6 +46,12 @@ export function ReversibleEmbedModule({ onComplete }: Props) {
       setResultPreview(imageDataToDataURL(embedResult.watermarkedImageData));
       setProgress("");
 
+      onComplete?.({
+        ...embedResult,
+        coverImageData: coverData,
+        watermarkImageData: wmData,
+      });
+
       onComplete?.(embedResult);
     } catch (err) {
       console.error("Embed error:", err);

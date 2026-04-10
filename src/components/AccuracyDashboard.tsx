@@ -52,12 +52,12 @@ export function AccuracyDashboard({ data }: Props) {
   const [computing, setComputing] = useState(false);
 
   const computeCharts = async () => {
-    if (!data?.coverGray || !data?.wmGray) return;
+    if (!data?.coverImageData || !data?.watermarkImageData) return;
     setComputing(true);
     try {
-      const sweep = await runAsync(() => sweepAlpha(data.coverGray, data.wmGray, 10));
+      const sweep = await runAsync(() => sweepAlpha(data.coverImageData, data.watermarkImageData, 10));
       setSweepData(sweep);
-      const ga = await runAsync(() => gaOptimize(data.coverGray, data.wmGray, 20, 30));
+      const ga = await runAsync(() => gaOptimize(data.coverImageData, data.watermarkImageData, 10, 10));
       setGaData(ga.history);
     } catch (e) {
       console.error(e);
