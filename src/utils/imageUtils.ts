@@ -47,6 +47,55 @@ export function fromGrayscale(gray: number[][]): ImageData {
   return imageData;
 }
 
+// Split ImageData into R, G, B channels (each a 2D array)
+export function splitRGB(imageData: ImageData): { r: number[][]; g: number[][]; b: number[][] } {
+  const { width, height, data } = imageData;
+  const r: number[][] = [], g: number[][] = [], b: number[][] = [];
+  for (let y = 0; y < height; y++) {
+    r[y] = []; g[y] = []; b[y] = [];
+    for (let x = 0; x < width; x++) {
+      const i = (y * width + x) * 4;
+      r[y][x] = data[i];
+      g[y][x] = data[i + 1];
+      b[y][x] = data[i + 2];
+    }
+  }
+  return { r, g, b };
+}
+
+// Merge R, G, B channels back into ImageData
+export function mergeRGB(r: number[][], g: number[][], b: number[][]): ImageData {
+  const height = r.length;
+  const width = r[0].length;
+  const imageData = new ImageData(width, height);
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      const i = (y * width + x) * 4;
+      imageData.data[i] = Math.max(0, Math.min(255, Math.round(r[y][x])));
+      imageData.data[i + 1] = Math.max(0, Math.min(255, Math.round(g[y][x])));
+      imageData.data[i + 2] = Math.max(0, Math.min(255, Math.round(b[y][x])));
+      imageData.data[i + 3] = 255;
+    }
+  }
+  return imageData;
+}
+
+// Resize a full-color ImageData using canvas (preserves color)
+export function resizeImageData(imageData: ImageData, targetW: number, targetH: number): ImageData {
+  const canvas = document.createElement("canvas");
+  canvas.width = imageData.width;
+  canvas.height = imageData.height;
+  const ctx = canvas.getContext("2d")!;
+  ctx.putImageData(imageData, 0, 0);
+  
+  const canvas2 = document.createElement("canvas");
+  canvas2.width = targetW;
+  canvas2.height = targetH;
+  const ctx2 = canvas2.getContext("2d")!;
+  ctx2.drawImage(canvas, 0, 0, targetW, targetH);
+  return ctx2.getImageData(0, 0, targetW, targetH);
+}
+
 // Convert ImageData to data URL
 export function imageDataToDataURL(imageData: ImageData): string {
   const canvas = document.createElement("canvas");
