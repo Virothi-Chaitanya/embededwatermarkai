@@ -138,7 +138,7 @@ export function ReversibleEmbedModule({ onComplete }: Props) {
             </Label>
             <Slider value={[alpha * 10000]} onValueChange={([v]) => setAlpha(v / 10000)}
               min={10} max={500} step={5} className="mt-1" />
-            <p className="text-[10px] text-muted-foreground mt-1">Lower α = higher PSNR (>40dB). Range: 0.001 – 0.05</p>
+            <p className="text-[10px] text-muted-foreground mt-1">Lower α = higher PSNR (&gt;40dB). Range: 0.001 – 0.05</p>
           </div>
 
           {/* GA Optimization */}
