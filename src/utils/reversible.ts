@@ -1,36 +1,26 @@
 /**
  * Reversible Color-Preserving Image Watermarking Engine
- * 
- * Approach:
- * 1. DWT-SVD watermark embedding on luminance channel only (color preserved)
- * 2. LSB encoding stores BOTH the original image AND watermark image 
- *    compressed data across R,G,B channels — enabling fully blind recovery
- * 3. Alpha value + dimensions stored in the header so no parameters needed for extraction
+ * Optimized for PSNR > 40 dB with full color fidelity
  */
 
 import { dwt2Level, idwt2Level } from "./dwt";
 import { svd, svdReconstruct } from "./svd";
 import { resizeGray, calculatePSNR, calculateSSIM, calculateNCC, calculateMSE, clampImage } from "./imageUtils";
 
-// ========== LSB ENCODING / DECODING (works on flat Uint8 arrays) ==========
+// ========== LSB ENCODING / DECODING ==========
 
-/** Encode bytes into LSBs of a flat pixel array (modifies in place) */
-function encodeLSBFlat(pixels: Uint8ClampedArray, data: number[], bitsPerChannel: number = 1): void {
+function encodeLSBFlat(pixels: Uint8ClampedArray, data: number[], bitsPerChannel: number = 2): void {
   const mask = (1 << bitsPerChannel) - 1;
   const clearMask = 255 - mask;
-
-  // Build all bits from data (prepend 32-bit length)
   const allBits: number[] = [];
   const dataLen = data.length;
   for (let i = 31; i >= 0; i--) allBits.push((dataLen >> i) & 1);
   for (const byte of data) {
     for (let i = 7; i >= 0; i--) allBits.push((byte >> i) & 1);
   }
-
   let bIdx = 0;
-  // Write into R, G, B channels (skip alpha every 4th byte)
   for (let i = 0; i < pixels.length && bIdx < allBits.length; i++) {
-    if (i % 4 === 3) continue; // skip alpha
+    if (i % 4 === 3) continue;
     let val = pixels[i] & clearMask;
     let embedded = 0;
     for (let b = bitsPerChannel - 1; b >= 0 && bIdx < allBits.length; b--) {
@@ -40,25 +30,20 @@ function encodeLSBFlat(pixels: Uint8ClampedArray, data: number[], bitsPerChannel
   }
 }
 
-/** Decode bytes from LSBs of a flat pixel array */
-function decodeLSBFlat(pixels: Uint8ClampedArray, bitsPerChannel: number = 1): number[] {
+function decodeLSBFlat(pixels: Uint8ClampedArray, bitsPerChannel: number = 2): number[] {
   const mask = (1 << bitsPerChannel) - 1;
   const allBits: number[] = [];
-
   for (let i = 0; i < pixels.length; i++) {
-    if (i % 4 === 3) continue; // skip alpha
+    if (i % 4 === 3) continue;
     const val = pixels[i] & mask;
     for (let b = bitsPerChannel - 1; b >= 0; b--) {
       allBits.push((val >> b) & 1);
     }
   }
-
-  // Read 32-bit length
   if (allBits.length < 32) return [];
   let dataLen = 0;
   for (let i = 0; i < 32; i++) dataLen = (dataLen << 1) | allBits[i];
   if (dataLen <= 0 || dataLen > (allBits.length - 32) / 8) return [];
-
   const data: number[] = [];
   let bIdx = 32;
   for (let i = 0; i < dataLen && bIdx + 7 < allBits.length; i++) {
@@ -69,11 +54,9 @@ function decodeLSBFlat(pixels: Uint8ClampedArray, bitsPerChannel: number = 1): n
   return data;
 }
 
-// ========== IMAGE COMPRESSION (for storing inside LSB) ==========
+// ========== IMAGE COMPRESSION ==========
 
-/** Compress an ImageData to a compact byte array (stores RGB at reduced quality) */
-function compressImageData(imageData: ImageData, maxDim: number = 64): number[] {
-  // Resize to small thumbnail first
+function compressImageData(imageData: ImageData, maxDim: number = 128): number[] {
   const canvas = document.createElement("canvas");
   canvas.width = imageData.width;
   canvas.height = imageData.height;
@@ -88,56 +71,41 @@ function compressImageData(imageData: ImageData, maxDim: number = 64): number[] 
   canvas2.width = tw;
   canvas2.height = th;
   const ctx2 = canvas2.getContext("2d")!;
+  ctx2.imageSmoothingQuality = "high";
   ctx2.drawImage(canvas, 0, 0, tw, th);
   const small = ctx2.getImageData(0, 0, tw, th);
 
-  // Header: 2 bytes width, 2 bytes height, then quantized RGB pixels
-  const header = [
-    (tw >> 8) & 0xFF, tw & 0xFF,
-    (th >> 8) & 0xFF, th & 0xFF,
-  ];
+  // Header: 2 bytes width, 2 bytes height
+  const header = [(tw >> 8) & 0xFF, tw & 0xFF, (th >> 8) & 0xFF, th & 0xFF];
 
-  // Store RGB at 5 bits each (15 bits per pixel = ~2 bytes)
+  // Store full 8-bit RGB for max quality recovery
   const packed: number[] = [];
   for (let i = 0; i < small.data.length; i += 4) {
-    const r5 = small.data[i] >> 3;
-    const g5 = small.data[i + 1] >> 3;
-    const b5 = small.data[i + 2] >> 3;
-    // Pack 15 bits into 2 bytes
-    const val = (r5 << 10) | (g5 << 5) | b5;
-    packed.push((val >> 8) & 0xFF);
-    packed.push(val & 0xFF);
+    packed.push(small.data[i], small.data[i + 1], small.data[i + 2]);
   }
-
   return [...header, ...packed];
 }
 
-/** Decompress byte array back to ImageData */
 function decompressImageData(data: number[]): ImageData | null {
   if (data.length < 4) return null;
   const tw = (data[0] << 8) | data[1];
   const th = (data[2] << 8) | data[3];
-  if (tw <= 0 || th <= 0 || tw > 2048 || th > 2048) return null;
+  if (tw <= 0 || th <= 0 || tw > 4096 || th > 4096) return null;
 
   const imageData = new ImageData(tw, th);
   const packed = data.slice(4);
   let pIdx = 0;
   for (let i = 0; i < imageData.data.length; i += 4) {
-    if (pIdx + 1 >= packed.length) break;
-    const val = (packed[pIdx] << 8) | packed[pIdx + 1];
-    pIdx += 2;
-    const r5 = (val >> 10) & 0x1F;
-    const g5 = (val >> 5) & 0x1F;
-    const b5 = val & 0x1F;
-    imageData.data[i] = (r5 << 3) | (r5 >> 2);
-    imageData.data[i + 1] = (g5 << 3) | (g5 >> 2);
-    imageData.data[i + 2] = (b5 << 3) | (b5 >> 2);
+    if (pIdx + 2 >= packed.length) break;
+    imageData.data[i] = packed[pIdx++];
+    imageData.data[i + 1] = packed[pIdx++];
+    imageData.data[i + 2] = packed[pIdx++];
     imageData.data[i + 3] = 255;
   }
   return imageData;
 }
 
-// ========== MAIN EMBED (COLOR PRESERVING) ==========
+// ========== MAIN EMBED ==========
 
 export interface ReversibleEmbedResult {
   watermarkedImageData: ImageData;
@@ -145,6 +113,7 @@ export interface ReversibleEmbedResult {
   ssim: number;
   mse: number;
   ncc: number;
+  snr: number;
   alpha: number;
   processingTimeMs: number;
   dimensions: { width: number; height: number };
@@ -154,24 +123,32 @@ export interface ReversibleEmbedResult {
   recoveryCapable: boolean;
 }
 
-/**
- * Embed watermark into cover image, preserving full color.
- * Also stores compressed copies of both images in LSB for blind recovery.
- */
+function calculateSNR(original: number[][], modified: number[][]): number {
+  const h = original.length, w = original[0].length;
+  let signalPow = 0, noisePow = 0;
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      signalPow += original[y][x] * original[y][x];
+      const diff = original[y][x] - modified[y][x];
+      noisePow += diff * diff;
+    }
+  }
+  if (noisePow === 0) return Infinity;
+  return 10 * Math.log10(signalPow / noisePow);
+}
+
 export function reversibleEmbed(
   coverImageData: ImageData,
   watermarkImageData: ImageData,
-  alpha: number = 0.1,
-  resolution: number = 256
+  alpha: number = 0.01,
+  resolution: number = 512
 ): ReversibleEmbedResult {
   const startTime = performance.now();
   const w = coverImageData.width;
   const h = coverImageData.height;
 
-  // Work on a copy of the cover image pixels
   const resultPixels = new Uint8ClampedArray(coverImageData.data);
 
-  // Step 1: DWT-SVD watermark embedding on luminance channel
   // Extract luminance
   const lumGray: number[][] = [];
   for (let y = 0; y < h; y++) {
@@ -182,14 +159,13 @@ export function reversibleEmbed(
     }
   }
 
-  // Downscale luminance for DWT-SVD processing
+  // Downscale for DWT-SVD
   const procSize = Math.min(resolution, Math.min(w, h));
   const lumSmall = resizeGray(lumGray, procSize, procSize);
 
-  // Convert watermark to grayscale and resize
+  // Watermark grayscale
   const wmGray: number[][] = [];
-  const wmW = watermarkImageData.width;
-  const wmH = watermarkImageData.height;
+  const wmW = watermarkImageData.width, wmH = watermarkImageData.height;
   for (let y = 0; y < wmH; y++) {
     wmGray[y] = [];
     for (let x = 0; x < wmW; x++) {
@@ -198,53 +174,52 @@ export function reversibleEmbed(
     }
   }
 
-  // Apply 2-level DWT on luminance
+  // DWT-SVD embedding
   const coeffs = dwt2Level(lumSmall);
   const ll2 = coeffs.LL2;
-  const llH = ll2.length;
-  const llW = ll2[0].length;
-
-  // SVD on LL2 subband
+  const llH = ll2.length, llW = ll2[0].length;
   const coverSvd = svd(ll2);
   const wmResized = resizeGray(wmGray, llW, llH);
   const wmSvd = svd(wmResized);
 
-  // S' = S + alpha * Sw
   const modifiedS = coverSvd.S.map((s, i) => {
     const sw = i < wmSvd.S.length ? wmSvd.S[i] : 0;
     return s + alpha * sw;
   });
 
-  coeffs.LL2 = svdReconstruct({
-    U: coverSvd.U, S: modifiedS, V: coverSvd.V,
-    rows: coverSvd.rows, cols: coverSvd.cols,
-  });
-
-  // Inverse DWT to get modified luminance
+  coeffs.LL2 = svdReconstruct({ U: coverSvd.U, S: modifiedS, V: coverSvd.V, rows: coverSvd.rows, cols: coverSvd.cols });
   const modifiedLum = clampImage(idwt2Level(coeffs));
   const modLumFull = resizeGray(modifiedLum, w, h);
 
-  // Apply luminance change to RGB proportionally (preserves color)
+  // Apply luminance change proportionally
   for (let y = 0; y < h; y++) {
     for (let x = 0; x < w; x++) {
       const i = (y * w + x) * 4;
       const origLum = lumGray[y][x] || 1;
       const newLum = modLumFull[y][x];
       const ratio = newLum / Math.max(origLum, 1);
-      // Scale each channel proportionally — keeps hue/saturation intact
       resultPixels[i] = Math.max(0, Math.min(255, Math.round(resultPixels[i] * ratio)));
       resultPixels[i + 1] = Math.max(0, Math.min(255, Math.round(resultPixels[i + 1] * ratio)));
       resultPixels[i + 2] = Math.max(0, Math.min(255, Math.round(resultPixels[i + 2] * ratio)));
     }
   }
 
-  // Step 2: Compress both images and encode via LSB
-  const thumbSize = Math.min(96, Math.floor(Math.sqrt(w * h) / 4));
+  // Compress & store via LSB (2 bits per channel for more capacity)
+  const capacity2bit = Math.floor((w * h * 3 * 2) / 8);
+  // Determine thumbnail size that fits
+  let thumbSize = 128;
+  while (thumbSize > 16) {
+    const testOrig = compressImageData(coverImageData, thumbSize);
+    const testWm = compressImageData(watermarkImageData, thumbSize);
+    const totalPayload = 2 + 4 + testOrig.length + 4 + testWm.length;
+    if (totalPayload < capacity2bit * 0.85) break;
+    thumbSize -= 16;
+  }
+
   const compressedOriginal = compressImageData(coverImageData, thumbSize);
   const compressedWatermark = compressImageData(watermarkImageData, thumbSize);
 
-  // Build payload: [alphaInt16, origLen32, origData, wmLen32, wmData]
-  const alphaInt = Math.round(alpha * 10000);
+  const alphaInt = Math.round(alpha * 100000);
   const payload: number[] = [
     (alphaInt >> 8) & 0xFF, alphaInt & 0xFF,
     (compressedOriginal.length >> 24) & 0xFF, (compressedOriginal.length >> 16) & 0xFF,
@@ -255,17 +230,14 @@ export function reversibleEmbed(
     ...compressedWatermark,
   ];
 
-  // Check capacity: 1 bit per RGB channel = 3 bits per pixel
-  const capacityBytes = Math.floor((w * h * 3) / 8);
-  const canStore = payload.length < capacityBytes * 0.9;
-
+  const canStore = payload.length < capacity2bit * 0.9;
   if (canStore) {
-    encodeLSBFlat(resultPixels, payload, 1);
+    encodeLSBFlat(resultPixels, payload, 2);
   }
 
   const resultImageData = new ImageData(resultPixels, w, h);
 
-  // Compute metrics on luminance
+  // Metrics on luminance
   const resultLum: number[][] = [];
   for (let y = 0; y < h; y++) {
     resultLum[y] = [];
@@ -279,10 +251,11 @@ export function reversibleEmbed(
   const ssim = calculateSSIM(lumGray, resultLum);
   const mse = calculateMSE(lumGray, resultLum);
   const ncc = calculateNCC(lumGray, resultLum);
+  const snr = calculateSNR(lumGray, resultLum);
 
   return {
     watermarkedImageData: resultImageData,
-    psnr, ssim, mse, ncc, alpha,
+    psnr, ssim, mse, ncc, snr, alpha,
     processingTimeMs: performance.now() - startTime,
     dimensions: { width: w, height: h },
     originalStorageSize: compressedOriginal.length,
@@ -301,24 +274,17 @@ export interface BlindExtractResult {
   processingTimeMs: number;
 }
 
-/**
- * Blind extraction — recovers BOTH original and watermark from a single watermarked image.
- * No parameters needed; alpha and dimensions are stored in the payload header.
- */
 export function blindExtract(watermarkedImageData: ImageData): BlindExtractResult {
   const startTime = performance.now();
   const pixels = watermarkedImageData.data;
 
-  // Decode LSB payload
-  const payload = decodeLSBFlat(pixels, 1);
+  const payload = decodeLSBFlat(pixels, 2);
   if (payload.length < 6) {
     return { recoveredOriginal: null, extractedWatermark: null, alpha: 0, processingTimeMs: performance.now() - startTime };
   }
 
-  // Parse header
   const alphaInt = (payload[0] << 8) | payload[1];
-  const alpha = alphaInt / 10000;
-
+  const alpha = alphaInt / 100000;
   const origLen = (payload[2] << 24) | (payload[3] << 16) | (payload[4] << 8) | payload[5];
   if (origLen <= 0 || 6 + origLen + 4 > payload.length) {
     return { recoveredOriginal: null, extractedWatermark: null, alpha, processingTimeMs: performance.now() - startTime };
@@ -328,21 +294,17 @@ export function blindExtract(watermarkedImageData: ImageData): BlindExtractResul
   const wmLenOffset = 6 + origLen;
   const wmLen = (payload[wmLenOffset] << 24) | (payload[wmLenOffset + 1] << 16) |
     (payload[wmLenOffset + 2] << 8) | payload[wmLenOffset + 3];
-
   const wmData = payload.slice(wmLenOffset + 4, wmLenOffset + 4 + wmLen);
 
-  const recoveredOriginal = decompressImageData(origData);
-  const extractedWatermark = decompressImageData(wmData);
-
   return {
-    recoveredOriginal,
-    extractedWatermark,
+    recoveredOriginal: decompressImageData(origData),
+    extractedWatermark: decompressImageData(wmData),
     alpha,
     processingTimeMs: performance.now() - startTime,
   };
 }
 
-// ========== NON-BLIND EXTRACTION (for metrics comparison) ==========
+// ========== NON-BLIND EXTRACTION ==========
 
 export interface ReversibleExtractResult {
   extractedWatermark: number[][];
@@ -365,10 +327,8 @@ export function extractFromWatermarked(
   wmHeight: number
 ): ReversibleExtractResult {
   const startTime = performance.now();
-
   const wmCoeffs = dwt2Level(watermarkedGray);
   const origCoeffs = dwt2Level(originalGray);
-
   const wmSvd = svd(wmCoeffs.LL2);
   const origSvd = svd(origCoeffs.LL2);
 
@@ -377,27 +337,21 @@ export function extractFromWatermarked(
     return Math.max(0, (s - origS) / alpha);
   });
 
-  const extracted = svdReconstruct({
-    U: wmSvd.U, S: extractedS, V: wmSvd.V,
-    rows: wmSvd.rows, cols: wmSvd.cols,
-  });
-
+  const extracted = svdReconstruct({ U: wmSvd.U, S: extractedS, V: wmSvd.V, rows: wmSvd.rows, cols: wmSvd.cols });
   let minV = Infinity, maxV = -Infinity;
   for (const row of extracted) for (const v of row) { if (v < minV) minV = v; if (v > maxV) maxV = v; }
   const range = maxV - minV || 1;
   const normalized = extracted.map(r => r.map(v => Math.max(0, Math.min(255, ((v - minV) / range) * 255))));
   const wmResult = resizeGray(normalized, wmWidth, wmHeight);
-
   const wmProxy = resizeGray(originalGray, wmWidth, wmHeight);
-  const wmPSNR = calculatePSNR(wmProxy, wmResult);
-  const wmSSIM = calculateSSIM(wmProxy, wmResult);
-  const wmNCC = calculateNCC(wmProxy, wmResult);
-  const wmMSE = calculateMSE(wmProxy, wmResult);
 
   return {
     extractedWatermark: wmResult,
     recoveredOriginal: null,
-    wmPSNR, wmSSIM, wmNCC, wmMSE,
+    wmPSNR: calculatePSNR(wmProxy, wmResult),
+    wmSSIM: calculateSSIM(wmProxy, wmResult),
+    wmNCC: calculateNCC(wmProxy, wmResult),
+    wmMSE: calculateMSE(wmProxy, wmResult),
     origPSNR: 0, origSSIM: 0, origRecoveryAccuracy: 0,
     processingTimeMs: performance.now() - startTime,
   };
@@ -413,6 +367,7 @@ export interface GAGeneration {
   bestPSNR: number;
   bestSSIM: number;
   bestNCC: number;
+  bestSNR: number;
 }
 
 export function gaOptimize(
@@ -421,21 +376,22 @@ export function gaOptimize(
   popSize: number = 20,
   generations: number = 30,
   onProgress?: (gen: number, total: number) => void
-): { bestAlpha: number; history: GAGeneration[] } {
-  interface Individual { alpha: number; fitness: number; psnr: number; ssim: number; ncc: number; }
+): { bestAlpha: number; bestPSNR: number; bestSSIM: number; bestNCC: number; bestSNR: number; history: GAGeneration[] } {
+  interface Individual { alpha: number; fitness: number; psnr: number; ssim: number; ncc: number; snr: number; }
 
   let pop: Individual[] = Array.from({ length: popSize }, () => ({
-    alpha: 0.01 + Math.random() * 0.49, fitness: 0, psnr: 0, ssim: 0, ncc: 0
+    alpha: 0.001 + Math.random() * 0.05, fitness: 0, psnr: 0, ssim: 0, ncc: 0, snr: 0
   }));
 
   const evaluate = (ind: Individual): Individual => {
-    const result = reversibleEmbed(coverImageData, watermarkImageData, ind.alpha);
+    const result = reversibleEmbed(coverImageData, watermarkImageData, ind.alpha, 128);
     const psnrNorm = Math.min(result.psnr / 60, 1);
-    const fitness = 0.4 * psnrNorm + 0.3 * result.ssim + 0.3 * result.ncc;
-    return { ...ind, fitness, psnr: result.psnr, ssim: result.ssim, ncc: result.ncc };
+    // Heavily weight PSNR to ensure > 40dB
+    const fitness = 0.5 * psnrNorm + 0.25 * result.ssim + 0.25 * result.ncc;
+    return { ...ind, fitness, psnr: result.psnr, ssim: result.ssim, ncc: result.ncc, snr: result.snr };
   };
 
-  let best: Individual = { alpha: 0.1, fitness: 0, psnr: 0, ssim: 0, ncc: 0 };
+  let best: Individual = { alpha: 0.01, fitness: 0, psnr: 0, ssim: 0, ncc: 0, snr: 0 };
   const history: GAGeneration[] = [];
 
   for (let gen = 0; gen < generations; gen++) {
@@ -446,9 +402,8 @@ export function gaOptimize(
     const avg = pop.reduce((s, p) => s + p.fitness, 0) / pop.length;
     history.push({
       generation: gen + 1, bestFitness: pop[0].fitness, avgFitness: avg,
-      bestAlpha: pop[0].alpha, bestPSNR: pop[0].psnr, bestSSIM: pop[0].ssim, bestNCC: pop[0].ncc,
+      bestAlpha: pop[0].alpha, bestPSNR: pop[0].psnr, bestSSIM: pop[0].ssim, bestNCC: pop[0].ncc, bestSNR: pop[0].snr,
     });
-
     onProgress?.(gen + 1, generations);
 
     const survivors = pop.slice(0, Math.ceil(popSize / 2));
@@ -457,14 +412,14 @@ export function gaOptimize(
       const p1 = survivors[Math.floor(Math.random() * survivors.length)];
       const p2 = survivors[Math.floor(Math.random() * survivors.length)];
       let childAlpha = (p1.alpha + p2.alpha) / 2;
-      if (Math.random() < 0.2) childAlpha += (Math.random() - 0.5) * 0.1;
-      childAlpha = Math.max(0.01, Math.min(0.5, childAlpha));
-      newPop.push({ alpha: childAlpha, fitness: 0, psnr: 0, ssim: 0, ncc: 0 });
+      if (Math.random() < 0.3) childAlpha += (Math.random() - 0.5) * 0.01;
+      childAlpha = Math.max(0.001, Math.min(0.1, childAlpha));
+      newPop.push({ alpha: childAlpha, fitness: 0, psnr: 0, ssim: 0, ncc: 0, snr: 0 });
     }
     pop = newPop;
   }
 
-  return { bestAlpha: best.alpha, history };
+  return { bestAlpha: best.alpha, bestPSNR: best.psnr, bestSSIM: best.ssim, bestNCC: best.ncc, bestSNR: best.snr, history };
 }
 
 // ========== ALPHA SWEEP ==========
@@ -475,16 +430,17 @@ export interface AlphaSweepPoint {
   ssim: number;
   ncc: number;
   mse: number;
+  snr: number;
 }
 
 export function sweepAlpha(coverImageData: ImageData, watermarkImageData: ImageData, steps: number = 10): AlphaSweepPoint[] {
   const points: AlphaSweepPoint[] = [];
   for (let i = 1; i <= steps; i++) {
-    const alpha = (i / steps) * 0.5;
-    const result = reversibleEmbed(coverImageData, watermarkImageData, alpha);
+    const alpha = (i / steps) * 0.05; // sweep 0.005 to 0.05 for high PSNR range
+    const result = reversibleEmbed(coverImageData, watermarkImageData, alpha, 128);
     points.push({
-      alpha: Math.round(alpha * 1000) / 1000,
-      psnr: result.psnr, ssim: result.ssim, ncc: result.ncc, mse: result.mse,
+      alpha: Math.round(alpha * 10000) / 10000,
+      psnr: result.psnr, ssim: result.ssim, ncc: result.ncc, mse: result.mse, snr: result.snr,
     });
   }
   return points;
