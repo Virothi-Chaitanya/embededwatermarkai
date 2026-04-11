@@ -9,23 +9,36 @@ interface ImageUploadProps {
   preview?: string | null;
   onClear?: () => void;
   accept?: string;
+  maxSizeMB?: number;
 }
 
-export function ImageUpload({ label, description, onFileSelect, preview, onClear, accept = "image/png,image/jpeg" }: ImageUploadProps) {
+export function ImageUpload({ label, description, onFileSelect, preview, onClear, accept = "image/png,image/jpeg,image/webp,image/bmp", maxSizeMB = 20 }: ImageUploadProps) {
   const [isDragging, setIsDragging] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const validateAndSelect = useCallback((file: File) => {
+    setError(null);
+    if (!file.type.startsWith("image/")) {
+      setError("Please select an image file");
+      return;
+    }
+    if (file.size > maxSizeMB * 1024 * 1024) {
+      setError(`File too large. Max ${maxSizeMB}MB`);
+      return;
+    }
+    onFileSelect(file);
+  }, [onFileSelect, maxSizeMB]);
 
   const handleDrop = useCallback((e: React.DragEvent) => {
     e.preventDefault();
     setIsDragging(false);
     const file = e.dataTransfer.files[0];
-    if (file && file.type.startsWith("image/")) {
-      onFileSelect(file);
-    }
-  }, [onFileSelect]);
+    if (file) validateAndSelect(file);
+  }, [validateAndSelect]);
 
   const handleChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
-    if (file) onFileSelect(file);
+    if (file) validateAndSelect(file);
   };
 
   return (
@@ -75,11 +88,12 @@ export function ImageUpload({ label, description, onFileSelect, preview, onClear
             </div>
             <div className="text-center">
               <p className="text-sm font-medium text-foreground">Drop image here or click to browse</p>
-              <p className="text-xs text-muted-foreground mt-1">PNG or JPG, max 5MB</p>
+              <p className="text-xs text-muted-foreground mt-1">PNG, JPG, WebP or BMP — max {maxSizeMB}MB</p>
             </div>
           </motion.div>
         )}
       </AnimatePresence>
+      {error && <p className="text-xs text-destructive">{error}</p>}
     </div>
   );
 }
