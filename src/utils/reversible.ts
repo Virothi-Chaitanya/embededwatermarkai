@@ -54,9 +54,9 @@ function decodeLSBFlat(pixels: Uint8ClampedArray, bitsPerChannel: number = 2): n
   return data;
 }
 
-// ========== IMAGE COMPRESSION ==========
+// ========== IMAGE COMPRESSION (JPEG-based for high quality) ==========
 
-function compressImageData(imageData: ImageData, maxDim: number = 128): number[] {
+function compressImageDataJPEG(imageData: ImageData, maxDim: number = 512, quality: number = 0.92): number[] {
   const canvas = document.createElement("canvas");
   canvas.width = imageData.width;
   canvas.height = imageData.height;
@@ -73,36 +73,33 @@ function compressImageData(imageData: ImageData, maxDim: number = 128): number[]
   const ctx2 = canvas2.getContext("2d")!;
   ctx2.imageSmoothingQuality = "high";
   ctx2.drawImage(canvas, 0, 0, tw, th);
-  const small = ctx2.getImageData(0, 0, tw, th);
 
-  // Header: 2 bytes width, 2 bytes height
-  const header = [(tw >> 8) & 0xFF, tw & 0xFF, (th >> 8) & 0xFF, th & 0xFF];
-
-  // Store full 8-bit RGB for max quality recovery
-  const packed: number[] = [];
-  for (let i = 0; i < small.data.length; i += 4) {
-    packed.push(small.data[i], small.data[i + 1], small.data[i + 2]);
+  // Use JPEG encoding — ~10-20x smaller than raw RGB, much higher quality recovery
+  const dataUrl = canvas2.toDataURL("image/jpeg", quality);
+  const base64 = dataUrl.split(",")[1];
+  const binaryStr = atob(base64);
+  const bytes: number[] = new Array(binaryStr.length);
+  for (let i = 0; i < binaryStr.length; i++) {
+    bytes[i] = binaryStr.charCodeAt(i);
   }
-  return [...header, ...packed];
+  return bytes;
 }
 
-function decompressImageData(data: number[]): ImageData | null {
-  if (data.length < 4) return null;
-  const tw = (data[0] << 8) | data[1];
-  const th = (data[2] << 8) | data[3];
-  if (tw <= 0 || th <= 0 || tw > 4096 || th > 4096) return null;
-
-  const imageData = new ImageData(tw, th);
-  const packed = data.slice(4);
-  let pIdx = 0;
-  for (let i = 0; i < imageData.data.length; i += 4) {
-    if (pIdx + 2 >= packed.length) break;
-    imageData.data[i] = packed[pIdx++];
-    imageData.data[i + 1] = packed[pIdx++];
-    imageData.data[i + 2] = packed[pIdx++];
-    imageData.data[i + 3] = 255;
+async function decompressImageDataJPEG(data: number[]): Promise<ImageData | null> {
+  if (data.length < 10) return null;
+  try {
+    const uint8 = new Uint8Array(data);
+    const blob = new Blob([uint8], { type: "image/jpeg" });
+    const bitmap = await createImageBitmap(blob);
+    const canvas = document.createElement("canvas");
+    canvas.width = bitmap.width;
+    canvas.height = bitmap.height;
+    const ctx = canvas.getContext("2d")!;
+    ctx.drawImage(bitmap, 0, 0);
+    return ctx.getImageData(0, 0, bitmap.width, bitmap.height);
+  } catch {
+    return null;
   }
-  return imageData;
 }
 
 // ========== MAIN EMBED ==========
@@ -206,18 +203,27 @@ export function reversibleEmbed(
 
   // Compress & store via LSB (2 bits per channel for more capacity)
   const capacity2bit = Math.floor((w * h * 3 * 2) / 8);
-  // Determine thumbnail size that fits
-  let thumbSize = 128;
-  while (thumbSize > 16) {
-    const testOrig = compressImageData(coverImageData, thumbSize);
-    const testWm = compressImageData(watermarkImageData, thumbSize);
-    const totalPayload = 2 + 4 + testOrig.length + 4 + testWm.length;
+  // JPEG compression is ~10-20x more efficient than raw RGB
+  // Try progressively larger thumbnails and higher quality
+  let thumbSize = 512;
+  let jpegQuality = 0.92;
+  let compressedOriginal: number[] = [];
+  let compressedWatermark: number[] = [];
+  
+  // Find the best quality that fits in the LSB capacity
+  while (thumbSize >= 64) {
+    compressedOriginal = compressImageDataJPEG(coverImageData, thumbSize, jpegQuality);
+    compressedWatermark = compressImageDataJPEG(watermarkImageData, thumbSize, jpegQuality);
+    const totalPayload = 2 + 4 + compressedOriginal.length + 4 + compressedWatermark.length;
     if (totalPayload < capacity2bit * 0.85) break;
-    thumbSize -= 16;
+    // Try lower quality first, then smaller size
+    if (jpegQuality > 0.6) {
+      jpegQuality -= 0.1;
+    } else {
+      jpegQuality = 0.92;
+      thumbSize -= 64;
+    }
   }
-
-  const compressedOriginal = compressImageData(coverImageData, thumbSize);
-  const compressedWatermark = compressImageData(watermarkImageData, thumbSize);
 
   const alphaInt = Math.round(alpha * 100000);
   const payload: number[] = [
@@ -274,7 +280,7 @@ export interface BlindExtractResult {
   processingTimeMs: number;
 }
 
-export function blindExtract(watermarkedImageData: ImageData): BlindExtractResult {
+export async function blindExtract(watermarkedImageData: ImageData): Promise<BlindExtractResult> {
   const startTime = performance.now();
   const pixels = watermarkedImageData.data;
 
@@ -296,9 +302,14 @@ export function blindExtract(watermarkedImageData: ImageData): BlindExtractResul
     (payload[wmLenOffset + 2] << 8) | payload[wmLenOffset + 3];
   const wmData = payload.slice(wmLenOffset + 4, wmLenOffset + 4 + wmLen);
 
+  const [recoveredOriginal, extractedWatermark] = await Promise.all([
+    decompressImageDataJPEG(origData),
+    decompressImageDataJPEG(wmData),
+  ]);
+
   return {
-    recoveredOriginal: decompressImageData(origData),
-    extractedWatermark: decompressImageData(wmData),
+    recoveredOriginal,
+    extractedWatermark,
     alpha,
     processingTimeMs: performance.now() - startTime,
   };

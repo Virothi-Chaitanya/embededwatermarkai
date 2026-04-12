@@ -23,7 +23,7 @@ export function ReversibleEmbedModule({ onComplete }: Props) {
   const [processing, setProcessing] = useState(false);
   const [progress, setProgress] = useState("");
   const [result, setResult] = useState<any>(null);
-  const [alpha, setAlpha] = useState(0.01);
+  const [alpha, setAlpha] = useState(0.005);
   const [gaRunning, setGaRunning] = useState(false);
   const [gaProgress, setGaProgress] = useState(0);
   const [gaResult, setGaResult] = useState<any>(null);
