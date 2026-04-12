@@ -31,7 +31,7 @@ const Index = () => {
           <div className="flex items-center gap-3">
             <div className="relative">
               <div className="p-2.5 rounded-xl bg-primary/10 border border-primary/20 animate-pulse-glow">
-                <img src="vignan.png"></img>
+                <img src="vignan.png" alt="logo" className="h-6 w-6 object-contain"/>
               </div>
               <div className="absolute -top-1 -right-1 w-3 h-3 bg-accent rounded-full animate-pulse" />
             </div>
@@ -69,7 +69,7 @@ const Index = () => {
               </span>
             </motion.div>
             <h2 className="text-4xl md:text-5xl font-bold font-heading text-foreground mb-4 leading-[1.1]">
-              Upload 2 Images, Get 1.<br /><span className="gradient-text">Recover Both.</span>
+              A Resilient Hybrid DWT-SVD<br /><span className="gradient-text">Watermarking Framework</span>
             </h2>
             <p className="text-muted-foreground text-sm leading-relaxed max-w-xl mx-auto mb-8">
               Hybrid frequency + spatial domain system with GA optimization. Supports up to <span className="text-accent font-medium">20MB images</span> with near-lossless quality.
