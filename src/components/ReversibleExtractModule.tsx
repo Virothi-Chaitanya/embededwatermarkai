@@ -1,20 +1,48 @@
-import { useState, useCallback } from "react";
+import { useState, useCallback, useEffect } from "react";
 import { motion } from "framer-motion";
 import { Loader2, Unlock, Download, CheckCircle2, XCircle, Upload } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { ImageUpload } from "./ImageUpload";
 import { loadImageFromFile, imageDataToDataURL } from "@/utils/imageUtils";
 import { blindExtract } from "@/utils/reversible";
-import { runAsync } from "@/utils/processing";
+import { extractShareablePayload } from "@/utils/shareablePayload";
+
+interface RecoveredAsset {
+  url: string;
+  name: string;
+}
 
 export function ReversibleExtractModule() {
   const [watermarkedFile, setWatermarkedFile] = useState<File | null>(null);
   const [watermarkedPreview, setWatermarkedPreview] = useState<string | null>(null);
   const [recoveredOrigPreview, setRecoveredOrigPreview] = useState<string | null>(null);
   const [extractedWmPreview, setExtractedWmPreview] = useState<string | null>(null);
+  const [recoveredOrigDownload, setRecoveredOrigDownload] = useState<RecoveredAsset | null>(null);
+  const [extractedWmDownload, setExtractedWmDownload] = useState<RecoveredAsset | null>(null);
   const [processing, setProcessing] = useState(false);
   const [progress, setProgress] = useState("");
   const [extractResult, setExtractResult] = useState<any>(null);
+
+  useEffect(() => {
+    return () => {
+      if (recoveredOrigDownload?.url) URL.revokeObjectURL(recoveredOrigDownload.url);
+      if (extractedWmDownload?.url) URL.revokeObjectURL(extractedWmDownload.url);
+    };
+  }, [recoveredOrigDownload, extractedWmDownload]);
+
+  const clearRecoveredOutputs = useCallback(() => {
+    setRecoveredOrigPreview(null);
+    setExtractedWmPreview(null);
+    setExtractResult(null);
+    setRecoveredOrigDownload((current) => {
+      if (current?.url) URL.revokeObjectURL(current.url);
+      return null;
+    });
+    setExtractedWmDownload((current) => {
+      if (current?.url) URL.revokeObjectURL(current.url);
+      return null;
+    });
+  }, []);
 
   const handleExtract = useCallback(async () => {
     if (!watermarkedFile) return;
@@ -22,6 +50,21 @@ export function ReversibleExtractModule() {
     setProgress("Loading watermarked image...");
 
     try {
+      clearRecoveredOutputs();
+      const packagedPayload = await extractShareablePayload(watermarkedFile);
+
+      if (packagedPayload) {
+        const originalUrl = URL.createObjectURL(new Blob([packagedPayload.original.bytes], { type: packagedPayload.original.mimeType }));
+        const watermarkUrl = URL.createObjectURL(new Blob([packagedPayload.watermark.bytes], { type: packagedPayload.watermark.mimeType }));
+        setRecoveredOrigPreview(originalUrl);
+        setExtractedWmPreview(watermarkUrl);
+        setRecoveredOrigDownload({ url: originalUrl, name: packagedPayload.original.fileName });
+        setExtractedWmDownload({ url: watermarkUrl, name: packagedPayload.watermark.fileName });
+        setExtractResult({ alpha: packagedPayload.alpha, processingTimeMs: 0, source: "payload" });
+        setProgress("");
+        return;
+      }
+
       const wmData = await loadImageFromFile(watermarkedFile);
 
       setProgress("Decoding hidden data (LSB extraction)...");
@@ -30,13 +73,17 @@ export function ReversibleExtractModule() {
       const result = await blindExtract(wmData);
 
       if (result.recoveredOriginal) {
-        setRecoveredOrigPreview(imageDataToDataURL(result.recoveredOriginal));
+        const preview = imageDataToDataURL(result.recoveredOriginal);
+        setRecoveredOrigPreview(preview);
+        setRecoveredOrigDownload({ url: preview, name: "recovered_original.png" });
       } else {
         setRecoveredOrigPreview(null);
       }
 
       if (result.extractedWatermark) {
-        setExtractedWmPreview(imageDataToDataURL(result.extractedWatermark));
+        const preview = imageDataToDataURL(result.extractedWatermark);
+        setExtractedWmPreview(preview);
+        setExtractedWmDownload({ url: preview, name: "extracted_watermark.png" });
       } else {
         setExtractedWmPreview(null);
       }
@@ -49,7 +96,7 @@ export function ReversibleExtractModule() {
     } finally {
       setProcessing(false);
     }
-  }, [watermarkedFile]);
+  }, [watermarkedFile, clearRecoveredOutputs]);
 
   const downloadImage = (dataUrl: string, name: string) => {
     const a = document.createElement("a");
@@ -67,7 +114,7 @@ export function ReversibleExtractModule() {
           Upload Watermarked Image
         </h3>
         <p className="text-xs text-muted-foreground mb-4">
-          Upload the watermarked image generated from the Embed section. The system will automatically recover both the original image and the watermark.
+          Upload the exact PNG downloaded from the Embed section. Anyone with that file can recover both the original image and the watermark.
         </p>
         <ImageUpload
           label="Watermarked Image"
@@ -75,17 +122,13 @@ export function ReversibleExtractModule() {
           onFileSelect={(f) => {
             setWatermarkedFile(f);
             setWatermarkedPreview(URL.createObjectURL(f));
-            setRecoveredOrigPreview(null);
-            setExtractedWmPreview(null);
-            setExtractResult(null);
+            clearRecoveredOutputs();
           }}
           preview={watermarkedPreview}
           onClear={() => {
             setWatermarkedFile(null);
             setWatermarkedPreview(null);
-            setRecoveredOrigPreview(null);
-            setExtractedWmPreview(null);
-            setExtractResult(null);
+            clearRecoveredOutputs();
           }}
         />
       </div>
@@ -121,7 +164,7 @@ export function ReversibleExtractModule() {
               {recoveredOrigPreview ? (
                 <>
                   <img src={recoveredOrigPreview} alt="Recovered Original" className="w-full rounded-xl border border-border bg-muted" />
-                  <Button onClick={() => downloadImage(recoveredOrigPreview, "recovered_original.png")}
+                  <Button onClick={() => recoveredOrigDownload && downloadImage(recoveredOrigDownload.url, recoveredOrigDownload.name)}
                     variant="outline" className="w-full mt-3 border-success/30 text-success hover:bg-success/10" size="sm">
                     <Download className="w-3.5 h-3.5 mr-2" /> Download Original
                   </Button>
@@ -146,7 +189,7 @@ export function ReversibleExtractModule() {
               {extractedWmPreview ? (
                 <>
                   <img src={extractedWmPreview} alt="Extracted Watermark" className="w-full rounded-xl border border-border bg-muted" />
-                  <Button onClick={() => downloadImage(extractedWmPreview, "extracted_watermark.png")}
+                  <Button onClick={() => extractedWmDownload && downloadImage(extractedWmDownload.url, extractedWmDownload.name)}
                     variant="outline" className="w-full mt-3 border-primary/30 text-primary hover:bg-primary/10" size="sm">
                     <Download className="w-3.5 h-3.5 mr-2" /> Download Watermark
                   </Button>
@@ -168,8 +211,8 @@ export function ReversibleExtractModule() {
                   <span className="text-foreground font-mono">{extractResult.alpha.toFixed(4)}</span>
                 </div>
                 <div className="flex justify-between">
-                  <span className="text-muted-foreground">Processing Time</span>
-                  <span className="text-foreground font-mono">{extractResult.processingTimeMs?.toFixed(0)}ms</span>
+                  <span className="text-muted-foreground">Recovery Mode</span>
+                  <span className="text-foreground font-mono">{extractResult.source === "payload" ? "Exact Share" : "Legacy LSB"}</span>
                 </div>
               </div>
             </div>

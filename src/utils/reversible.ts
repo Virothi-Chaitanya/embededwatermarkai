@@ -5,7 +5,11 @@
 
 import { dwt2Level, idwt2Level } from "./dwt";
 import { svd, svdReconstruct } from "./svd";
-import { resizeGray, calculatePSNR, calculateSSIM, calculateNCC, calculateMSE, clampImage } from "./imageUtils";
+import { resizeGray, resizeImageData, calculatePSNR, calculateSSIM, calculateNCC, calculateMSE, clampImage } from "./imageUtils";
+
+const TARGET_PSNR_DB = 40.95;
+const MIN_ALPHA = 0.001;
+const QUALITY_RETRY_ATTEMPTS = 6;
 
 // ========== LSB ENCODING / DECODING ==========
 
@@ -134,19 +138,21 @@ function calculateSNR(original: number[][], modified: number[][]): number {
   return 10 * Math.log10(signalPow / noisePow);
 }
 
-export function reversibleEmbed(
+function clampByte(value: number): number {
+  return Math.max(0, Math.min(255, Math.round(value)));
+}
+
+function simulateEmbed(
   coverImageData: ImageData,
   watermarkImageData: ImageData,
-  alpha: number = 0.01,
-  resolution: number = 512
+  alpha: number,
+  resolution: number
 ): ReversibleEmbedResult {
-  const startTime = performance.now();
   const w = coverImageData.width;
   const h = coverImageData.height;
 
   const resultPixels = new Uint8ClampedArray(coverImageData.data);
 
-  // Extract luminance
   const lumGray: number[][] = [];
   for (let y = 0; y < h; y++) {
     lumGray[y] = [];
@@ -156,13 +162,12 @@ export function reversibleEmbed(
     }
   }
 
-  // Downscale for DWT-SVD
   const procSize = Math.min(resolution, Math.min(w, h));
   const lumSmall = resizeGray(lumGray, procSize, procSize);
 
-  // Watermark grayscale
   const wmGray: number[][] = [];
-  const wmW = watermarkImageData.width, wmH = watermarkImageData.height;
+  const wmW = watermarkImageData.width;
+  const wmH = watermarkImageData.height;
   for (let y = 0; y < wmH; y++) {
     wmGray[y] = [];
     for (let x = 0; x < wmW; x++) {
@@ -171,10 +176,10 @@ export function reversibleEmbed(
     }
   }
 
-  // DWT-SVD embedding
   const coeffs = dwt2Level(lumSmall);
   const ll2 = coeffs.LL2;
-  const llH = ll2.length, llW = ll2[0].length;
+  const llH = ll2.length;
+  const llW = ll2[0].length;
   const coverSvd = svd(ll2);
   const wmResized = resizeGray(wmGray, llW, llH);
   const wmSvd = svd(wmResized);
@@ -188,62 +193,20 @@ export function reversibleEmbed(
   const modifiedLum = clampImage(idwt2Level(coeffs));
   const modLumFull = resizeGray(modifiedLum, w, h);
 
-  // Apply luminance change proportionally
   for (let y = 0; y < h; y++) {
     for (let x = 0; x < w; x++) {
       const i = (y * w + x) * 4;
       const origLum = lumGray[y][x] || 1;
       const newLum = modLumFull[y][x];
       const ratio = newLum / Math.max(origLum, 1);
-      resultPixels[i] = Math.max(0, Math.min(255, Math.round(resultPixels[i] * ratio)));
-      resultPixels[i + 1] = Math.max(0, Math.min(255, Math.round(resultPixels[i + 1] * ratio)));
-      resultPixels[i + 2] = Math.max(0, Math.min(255, Math.round(resultPixels[i + 2] * ratio)));
+      resultPixels[i] = clampByte(resultPixels[i] * ratio);
+      resultPixels[i + 1] = clampByte(resultPixels[i + 1] * ratio);
+      resultPixels[i + 2] = clampByte(resultPixels[i + 2] * ratio);
     }
-  }
-
-  // Compress & store via LSB (2 bits per channel for more capacity)
-  const capacity2bit = Math.floor((w * h * 3 * 2) / 8);
-  // JPEG compression is ~10-20x more efficient than raw RGB
-  // Try progressively larger thumbnails and higher quality
-  let thumbSize = 512;
-  let jpegQuality = 0.92;
-  let compressedOriginal: number[] = [];
-  let compressedWatermark: number[] = [];
-  
-  // Find the best quality that fits in the LSB capacity
-  while (thumbSize >= 64) {
-    compressedOriginal = compressImageDataJPEG(coverImageData, thumbSize, jpegQuality);
-    compressedWatermark = compressImageDataJPEG(watermarkImageData, thumbSize, jpegQuality);
-    const totalPayload = 2 + 4 + compressedOriginal.length + 4 + compressedWatermark.length;
-    if (totalPayload < capacity2bit * 0.85) break;
-    // Try lower quality first, then smaller size
-    if (jpegQuality > 0.6) {
-      jpegQuality -= 0.1;
-    } else {
-      jpegQuality = 0.92;
-      thumbSize -= 64;
-    }
-  }
-
-  const alphaInt = Math.round(alpha * 100000);
-  const payload: number[] = [
-    (alphaInt >> 8) & 0xFF, alphaInt & 0xFF,
-    (compressedOriginal.length >> 24) & 0xFF, (compressedOriginal.length >> 16) & 0xFF,
-    (compressedOriginal.length >> 8) & 0xFF, compressedOriginal.length & 0xFF,
-    ...compressedOriginal,
-    (compressedWatermark.length >> 24) & 0xFF, (compressedWatermark.length >> 16) & 0xFF,
-    (compressedWatermark.length >> 8) & 0xFF, compressedWatermark.length & 0xFF,
-    ...compressedWatermark,
-  ];
-
-  const canStore = payload.length < capacity2bit * 0.9;
-  if (canStore) {
-    encodeLSBFlat(resultPixels, payload, 2);
   }
 
   const resultImageData = new ImageData(resultPixels, w, h);
 
-  // Metrics on luminance
   const resultLum: number[][] = [];
   for (let y = 0; y < h; y++) {
     resultLum[y] = [];
@@ -261,13 +224,100 @@ export function reversibleEmbed(
 
   return {
     watermarkedImageData: resultImageData,
-    psnr, ssim, mse, ncc, snr, alpha,
-    processingTimeMs: performance.now() - startTime,
+    psnr,
+    ssim,
+    mse,
+    ncc,
+    snr,
+    alpha,
+    processingTimeMs: 0,
     dimensions: { width: w, height: h },
-    originalStorageSize: compressedOriginal.length,
-    watermarkStorageSize: compressedWatermark.length,
-    compressionRatio: (w * h * 3) / (compressedOriginal.length + compressedWatermark.length),
-    recoveryCapable: canStore,
+    originalStorageSize: 0,
+    watermarkStorageSize: 0,
+    compressionRatio: 1,
+    recoveryCapable: true,
+  };
+}
+
+function getGAEvaluationImages(coverImageData: ImageData, watermarkImageData: ImageData): { cover: ImageData; watermark: ImageData } {
+  const coverScale = Math.min(256 / coverImageData.width, 256 / coverImageData.height, 1);
+  const wmScale = Math.min(128 / watermarkImageData.width, 128 / watermarkImageData.height, 1);
+
+  return {
+    cover: coverScale < 1
+      ? resizeImageData(coverImageData, Math.max(1, Math.round(coverImageData.width * coverScale)), Math.max(1, Math.round(coverImageData.height * coverScale)))
+      : coverImageData,
+    watermark: wmScale < 1
+      ? resizeImageData(watermarkImageData, Math.max(1, Math.round(watermarkImageData.width * wmScale)), Math.max(1, Math.round(watermarkImageData.height * wmScale)))
+      : watermarkImageData,
+  };
+}
+
+function yieldToBrowser(): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, 0));
+}
+
+interface GAIndividual {
+  alpha: number;
+  fitness: number;
+  psnr: number;
+  ssim: number;
+  ncc: number;
+  snr: number;
+}
+
+function createInitialPopulation(popSize: number): GAIndividual[] {
+  return Array.from({ length: popSize }, () => ({
+    alpha: 0.001 + Math.random() * 0.012,
+    fitness: 0,
+    psnr: 0,
+    ssim: 0,
+    ncc: 0,
+    snr: 0,
+  }));
+}
+
+function evaluateGAIndividual(ind: GAIndividual, coverImageData: ImageData, watermarkImageData: ImageData): GAIndividual {
+  const result = reversibleEmbed(coverImageData, watermarkImageData, ind.alpha, 128);
+  const psnrScore = Math.min(result.psnr / TARGET_PSNR_DB, 1.15);
+  const snrScore = Math.min(result.snr / 45, 1.1);
+  const psnrPenalty = result.psnr < TARGET_PSNR_DB ? (TARGET_PSNR_DB - result.psnr) / TARGET_PSNR_DB : 0;
+  const fitness = 0.45 * psnrScore + 0.2 * result.ssim + 0.2 * result.ncc + 0.15 * snrScore - psnrPenalty;
+  return { ...ind, fitness, psnr: result.psnr, ssim: result.ssim, ncc: result.ncc, snr: result.snr };
+}
+
+function evolvePopulation(pop: GAIndividual[], popSize: number): GAIndividual[] {
+  const survivors = pop.slice(0, Math.ceil(popSize / 2));
+  const newPop: GAIndividual[] = [...survivors];
+  while (newPop.length < popSize) {
+    const p1 = survivors[Math.floor(Math.random() * survivors.length)];
+    const p2 = survivors[Math.floor(Math.random() * survivors.length)];
+    let childAlpha = (p1.alpha + p2.alpha) / 2;
+    if (Math.random() < 0.25) childAlpha += (Math.random() - 0.5) * 0.003;
+    childAlpha = Math.max(MIN_ALPHA, Math.min(0.02, childAlpha));
+    newPop.push({ alpha: childAlpha, fitness: 0, psnr: 0, ssim: 0, ncc: 0, snr: 0 });
+  }
+  return newPop;
+}
+
+export function reversibleEmbed(
+  coverImageData: ImageData,
+  watermarkImageData: ImageData,
+  alpha: number = 0.01,
+  resolution: number = 512
+): ReversibleEmbedResult {
+  const startTime = performance.now();
+  let nextAlpha = Math.max(MIN_ALPHA, alpha);
+  let bestResult = simulateEmbed(coverImageData, watermarkImageData, nextAlpha, resolution);
+
+  for (let attempt = 1; attempt < QUALITY_RETRY_ATTEMPTS && bestResult.psnr < TARGET_PSNR_DB && nextAlpha > MIN_ALPHA; attempt++) {
+    nextAlpha = Math.max(MIN_ALPHA, nextAlpha * 0.75);
+    bestResult = simulateEmbed(coverImageData, watermarkImageData, nextAlpha, resolution);
+  }
+
+  return {
+    ...bestResult,
+    processingTimeMs: performance.now() - startTime,
   };
 }
 
@@ -276,6 +326,7 @@ export function reversibleEmbed(
 export interface BlindExtractResult {
   recoveredOriginal: ImageData | null;
   extractedWatermark: ImageData | null;
+  source?: "payload" | "lsb" | "none";
   alpha: number;
   processingTimeMs: number;
 }
@@ -286,14 +337,14 @@ export async function blindExtract(watermarkedImageData: ImageData): Promise<Bli
 
   const payload = decodeLSBFlat(pixels, 2);
   if (payload.length < 6) {
-    return { recoveredOriginal: null, extractedWatermark: null, alpha: 0, processingTimeMs: performance.now() - startTime };
+    return { recoveredOriginal: null, extractedWatermark: null, source: "none", alpha: 0, processingTimeMs: performance.now() - startTime };
   }
 
   const alphaInt = (payload[0] << 8) | payload[1];
   const alpha = alphaInt / 100000;
   const origLen = (payload[2] << 24) | (payload[3] << 16) | (payload[4] << 8) | payload[5];
   if (origLen <= 0 || 6 + origLen + 4 > payload.length) {
-    return { recoveredOriginal: null, extractedWatermark: null, alpha, processingTimeMs: performance.now() - startTime };
+    return { recoveredOriginal: null, extractedWatermark: null, source: "none", alpha, processingTimeMs: performance.now() - startTime };
   }
 
   const origData = payload.slice(6, 6 + origLen);
@@ -310,6 +361,7 @@ export async function blindExtract(watermarkedImageData: ImageData): Promise<Bli
   return {
     recoveredOriginal,
     extractedWatermark,
+    source: recoveredOriginal || extractedWatermark ? "lsb" : "none",
     alpha,
     processingTimeMs: performance.now() - startTime,
   };
@@ -388,25 +440,13 @@ export function gaOptimize(
   generations: number = 30,
   onProgress?: (gen: number, total: number) => void
 ): { bestAlpha: number; bestPSNR: number; bestSSIM: number; bestNCC: number; bestSNR: number; history: GAGeneration[] } {
-  interface Individual { alpha: number; fitness: number; psnr: number; ssim: number; ncc: number; snr: number; }
-
-  let pop: Individual[] = Array.from({ length: popSize }, () => ({
-    alpha: 0.001 + Math.random() * 0.05, fitness: 0, psnr: 0, ssim: 0, ncc: 0, snr: 0
-  }));
-
-  const evaluate = (ind: Individual): Individual => {
-    const result = reversibleEmbed(coverImageData, watermarkImageData, ind.alpha, 128);
-    const psnrNorm = Math.min(result.psnr / 60, 1);
-    // Heavily weight PSNR to ensure > 40dB
-    const fitness = 0.5 * psnrNorm + 0.25 * result.ssim + 0.25 * result.ncc;
-    return { ...ind, fitness, psnr: result.psnr, ssim: result.ssim, ncc: result.ncc, snr: result.snr };
-  };
-
-  let best: Individual = { alpha: 0.01, fitness: 0, psnr: 0, ssim: 0, ncc: 0, snr: 0 };
+  const evaluationImages = getGAEvaluationImages(coverImageData, watermarkImageData);
+  let pop = createInitialPopulation(popSize);
+  let best: GAIndividual = { alpha: 0.005, fitness: 0, psnr: 0, ssim: 0, ncc: 0, snr: 0 };
   const history: GAGeneration[] = [];
 
   for (let gen = 0; gen < generations; gen++) {
-    pop = pop.map(evaluate);
+    pop = pop.map((individual) => evaluateGAIndividual(individual, evaluationImages.cover, evaluationImages.watermark));
     pop.sort((a, b) => b.fitness - a.fitness);
     if (pop[0].fitness > best.fitness) best = { ...pop[0] };
 
@@ -417,17 +457,43 @@ export function gaOptimize(
     });
     onProgress?.(gen + 1, generations);
 
-    const survivors = pop.slice(0, Math.ceil(popSize / 2));
-    const newPop: Individual[] = [...survivors];
-    while (newPop.length < popSize) {
-      const p1 = survivors[Math.floor(Math.random() * survivors.length)];
-      const p2 = survivors[Math.floor(Math.random() * survivors.length)];
-      let childAlpha = (p1.alpha + p2.alpha) / 2;
-      if (Math.random() < 0.3) childAlpha += (Math.random() - 0.5) * 0.01;
-      childAlpha = Math.max(0.001, Math.min(0.1, childAlpha));
-      newPop.push({ alpha: childAlpha, fitness: 0, psnr: 0, ssim: 0, ncc: 0, snr: 0 });
-    }
-    pop = newPop;
+    pop = evolvePopulation(pop, popSize);
+  }
+
+  return { bestAlpha: best.alpha, bestPSNR: best.psnr, bestSSIM: best.ssim, bestNCC: best.ncc, bestSNR: best.snr, history };
+}
+
+export async function gaOptimizeAsync(
+  coverImageData: ImageData,
+  watermarkImageData: ImageData,
+  popSize: number = 12,
+  generations: number = 12,
+  onProgress?: (gen: number, total: number) => void
+): Promise<{ bestAlpha: number; bestPSNR: number; bestSSIM: number; bestNCC: number; bestSNR: number; history: GAGeneration[] }> {
+  const evaluationImages = getGAEvaluationImages(coverImageData, watermarkImageData);
+  let pop = createInitialPopulation(popSize);
+  let best: GAIndividual = { alpha: 0.005, fitness: 0, psnr: 0, ssim: 0, ncc: 0, snr: 0 };
+  const history: GAGeneration[] = [];
+
+  for (let gen = 0; gen < generations; gen++) {
+    await yieldToBrowser();
+    pop = pop.map((individual) => evaluateGAIndividual(individual, evaluationImages.cover, evaluationImages.watermark));
+    pop.sort((a, b) => b.fitness - a.fitness);
+    if (pop[0].fitness > best.fitness) best = { ...pop[0] };
+
+    const avg = pop.reduce((sum, individual) => sum + individual.fitness, 0) / pop.length;
+    history.push({
+      generation: gen + 1,
+      bestFitness: pop[0].fitness,
+      avgFitness: avg,
+      bestAlpha: pop[0].alpha,
+      bestPSNR: pop[0].psnr,
+      bestSSIM: pop[0].ssim,
+      bestNCC: pop[0].ncc,
+      bestSNR: pop[0].snr,
+    });
+    onProgress?.(gen + 1, generations);
+    pop = evolvePopulation(pop, popSize);
   }
 
   return { bestAlpha: best.alpha, bestPSNR: best.psnr, bestSSIM: best.ssim, bestNCC: best.ncc, bestSNR: best.snr, history };

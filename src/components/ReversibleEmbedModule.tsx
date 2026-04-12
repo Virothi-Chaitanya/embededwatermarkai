@@ -1,14 +1,15 @@
-import { useState, useCallback } from "react";
+import { useState, useCallback, useEffect } from "react";
 import { motion } from "framer-motion";
 import { Loader2, Lock, Download, CheckCircle2, Sparkles, Cpu, FileText } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { ImageUpload } from "./ImageUpload";
 import { loadImageFromFile, imageDataToDataURL } from "@/utils/imageUtils";
-import { reversibleEmbed, gaOptimize } from "@/utils/reversible";
+import { reversibleEmbed, gaOptimizeAsync } from "@/utils/reversible";
 import { runAsync } from "@/utils/processing";
 import { Slider } from "@/components/ui/slider";
 import { Label } from "@/components/ui/label";
 import { Progress } from "@/components/ui/progress";
+import { createShareableWatermarkedBlob } from "@/utils/shareablePayload";
 
 interface Props {
   onComplete?: (data: any) => void;
@@ -27,6 +28,25 @@ export function ReversibleEmbedModule({ onComplete }: Props) {
   const [gaRunning, setGaRunning] = useState(false);
   const [gaProgress, setGaProgress] = useState(0);
   const [gaResult, setGaResult] = useState<any>(null);
+  const [downloadUrl, setDownloadUrl] = useState<string | null>(null);
+
+  useEffect(() => {
+    return () => {
+      if (downloadUrl) URL.revokeObjectURL(downloadUrl);
+    };
+  }, [downloadUrl]);
+
+  const resetOutputs = useCallback(() => {
+    setResultPreview(null);
+    setResult(null);
+    setGaResult(null);
+    setGaProgress(0);
+    setProgress("");
+    setDownloadUrl((current) => {
+      if (current) URL.revokeObjectURL(current);
+      return null;
+    });
+  }, []);
 
   const handleEmbed = useCallback(async () => {
     if (!coverFile || !wmFile) return;
@@ -34,13 +54,28 @@ export function ReversibleEmbedModule({ onComplete }: Props) {
     setProgress("Loading images...");
     try {
       const [coverData, wmData] = await Promise.all([loadImageFromFile(coverFile), loadImageFromFile(wmFile)]);
-      setProgress("Embedding watermark (DWT-SVD + LSB)...");
+      setProgress("Embedding watermark (DWT-SVD)...");
       await new Promise(r => setTimeout(r, 20));
       const embedResult = await runAsync(() => reversibleEmbed(coverData, wmData, alpha));
-      setResult(embedResult);
+      setProgress("Packing exact-share PNG...");
+      const shareable = await createShareableWatermarkedBlob(embedResult.watermarkedImageData, coverFile, wmFile, embedResult.alpha);
+      const nextDownloadUrl = URL.createObjectURL(shareable.blob);
+      setDownloadUrl((current) => {
+        if (current) URL.revokeObjectURL(current);
+        return nextDownloadUrl;
+      });
+      const finalResult = {
+        ...embedResult,
+        recoveryCapable: true,
+        originalStorageSize: coverFile.size,
+        watermarkStorageSize: wmFile.size,
+        packagedFileSize: shareable.outputBytes,
+        compressionRatio: shareable.payloadBytes > 0 ? shareable.outputBytes / shareable.payloadBytes : 1,
+      };
+      setResult(finalResult);
       setResultPreview(imageDataToDataURL(embedResult.watermarkedImageData));
       setProgress("");
-      onComplete?.({ ...embedResult, coverImageData: coverData, watermarkImageData: wmData });
+      onComplete?.({ ...finalResult, coverImageData: coverData, watermarkImageData: wmData });
     } catch (err) {
       console.error("Embed error:", err);
       setProgress("Error during processing");
@@ -55,9 +90,9 @@ export function ReversibleEmbedModule({ onComplete }: Props) {
     setGaProgress(0);
     try {
       const [coverData, wmData] = await Promise.all([loadImageFromFile(coverFile), loadImageFromFile(wmFile)]);
-      const ga = await runAsync(() => gaOptimize(coverData, wmData, 15, 20, (gen, total) => {
+      const ga = await gaOptimizeAsync(coverData, wmData, 10, 10, (gen, total) => {
         setGaProgress(Math.round((gen / total) * 100));
-      }));
+      });
       setGaResult(ga);
       setAlpha(ga.bestAlpha);
     } catch (err) {
@@ -68,10 +103,10 @@ export function ReversibleEmbedModule({ onComplete }: Props) {
   }, [coverFile, wmFile]);
 
   const handleDownload = () => {
-    if (!resultPreview) return;
+    if (!downloadUrl) return;
     const a = document.createElement("a");
-    a.href = resultPreview;
-    a.download = "watermarked_image.png";
+    a.href = downloadUrl;
+    a.download = "watermarked_shareable.png";
     a.click();
   };
 
@@ -92,15 +127,16 @@ export function ReversibleEmbedModule({ onComplete }: Props) {
       `\n--- Parameters ---`,
       `Alpha (α): ${result.alpha?.toFixed(6)}`,
       `Processing Time: ${result.processingTimeMs?.toFixed(0)} ms`,
-      `Compression Ratio: ${result.compressionRatio?.toFixed(2)}x`,
-      `Recovery Capable: ${result.recoveryCapable ? 'Yes' : 'No'}`,
-      `Original Storage: ${result.originalStorageSize} bytes`,
-      `Watermark Storage: ${result.watermarkStorageSize} bytes`,
+      `PSNR Target Met: ${result.psnr >= 40.95 ? 'Yes' : 'No'}`,
+      `Exact Recovery Ready: ${result.recoveryCapable ? 'Yes' : 'No'}`,
+      `Original File Size: ${result.originalStorageSize} bytes`,
+      `Watermark File Size: ${result.watermarkStorageSize} bytes`,
+      `Shareable PNG Size: ${result.packagedFileSize || 0} bytes`,
       gaResult ? `\n--- GA Optimization ---\nBest Alpha: ${gaResult.bestAlpha?.toFixed(6)}\nBest PSNR: ${gaResult.bestPSNR?.toFixed(4)} dB\nBest SSIM: ${gaResult.bestSSIM?.toFixed(6)}\nBest SNR: ${gaResult.bestSNR?.toFixed(4)} dB` : '',
       `\n--- Method ---`,
       `Algorithm: 2-Level DWT + SVD (frequency domain)`,
-      `Recovery: LSB Encoding (spatial domain, 2-bit)`,
-      `Optimization: Genetic Algorithm`,
+      `Recovery: Exact source files packed inside downloaded PNG`,
+      `Optimization: Non-blocking Genetic Algorithm`,
     ].join("\n");
     const blob = new Blob([report], { type: "text/plain" });
     const a = document.createElement("a");
@@ -118,13 +154,13 @@ export function ReversibleEmbedModule({ onComplete }: Props) {
           </h3>
           <div className="space-y-4">
             <ImageUpload label="Original Image" description="The image to protect (max 20MB)"
-              onFileSelect={(f) => { setCoverFile(f); setCoverPreview(URL.createObjectURL(f)); setResultPreview(null); setResult(null); setGaResult(null); }}
+              onFileSelect={(f) => { setCoverFile(f); setCoverPreview(URL.createObjectURL(f)); resetOutputs(); }}
               preview={coverPreview}
-              onClear={() => { setCoverFile(null); setCoverPreview(null); setResultPreview(null); setResult(null); setGaResult(null); }} />
+              onClear={() => { setCoverFile(null); setCoverPreview(null); resetOutputs(); }} />
             <ImageUpload label="Watermark Image" description="Logo or pattern to embed secretly"
-              onFileSelect={(f) => { setWmFile(f); setWmPreview(URL.createObjectURL(f)); setResultPreview(null); setResult(null); setGaResult(null); }}
+              onFileSelect={(f) => { setWmFile(f); setWmPreview(URL.createObjectURL(f)); resetOutputs(); }}
               preview={wmPreview}
-              onClear={() => { setWmFile(null); setWmPreview(null); setResultPreview(null); setResult(null); setGaResult(null); }} />
+              onClear={() => { setWmFile(null); setWmPreview(null); resetOutputs(); }} />
           </div>
         </div>
 
@@ -137,8 +173,8 @@ export function ReversibleEmbedModule({ onComplete }: Props) {
               Alpha (α): <span className="text-accent font-mono">{alpha.toFixed(4)}</span>
             </Label>
             <Slider value={[alpha * 10000]} onValueChange={([v]) => setAlpha(v / 10000)}
-              min={10} max={500} step={5} className="mt-1" />
-            <p className="text-[10px] text-muted-foreground mt-1">Lower α = higher PSNR (&gt;40dB). Range: 0.001 – 0.05</p>
+              min={10} max={200} step={5} className="mt-1" />
+            <p className="text-[10px] text-muted-foreground mt-1">Auto-tuned to keep PSNR ≥ 40.95 dB. Range: 0.001 – 0.02</p>
           </div>
 
           {/* GA Optimization */}
@@ -154,7 +190,7 @@ export function ReversibleEmbedModule({ onComplete }: Props) {
             {gaRunning && <Progress value={gaProgress} className="mt-2 h-1.5" />}
             {gaResult && !gaRunning && (
               <div className="mt-2 p-2 rounded-lg bg-accent/5 border border-accent/20 text-[10px] text-accent">
-                ✓ Best α = {gaResult.bestAlpha.toFixed(4)} | PSNR = {gaResult.bestPSNR.toFixed(1)}dB | SNR = {gaResult.bestSNR?.toFixed(1)}dB
+                ✓ Best α = {gaResult.bestAlpha.toFixed(4)} | PSNR = {gaResult.bestPSNR.toFixed(2)}dB | SNR = {gaResult.bestSNR?.toFixed(2)}dB
               </div>
             )}
           </div>
@@ -195,11 +231,12 @@ export function ReversibleEmbedModule({ onComplete }: Props) {
             <div className="glass-card p-5">
               <h3 className="text-sm font-semibold font-heading text-foreground mb-3 flex items-center gap-2">
                 <CheckCircle2 className="w-4 h-4 text-success" />
-                Watermarked Image (Identical to Original)
+                High-Fidelity Watermarked Image
               </h3>
               <img src={resultPreview} alt="Watermarked" className="w-full rounded-xl border border-border bg-muted" />
+              <p className="text-[10px] text-muted-foreground mt-3">Download and share this PNG file directly so anyone can extract the exact original and watermark.</p>
               <div className="grid grid-cols-2 gap-2 mt-3">
-                <Button onClick={handleDownload} variant="outline" className="border-primary/30 text-primary hover:bg-primary/10" size="sm">
+                <Button onClick={handleDownload} disabled={!downloadUrl} variant="outline" className="border-primary/30 text-primary hover:bg-primary/10" size="sm">
                   <Download className="w-3.5 h-3.5 mr-2" /> Download Image
                 </Button>
                 <Button onClick={handleDownloadReport} variant="outline" className="border-accent/30 text-accent hover:bg-accent/10" size="sm">
@@ -209,8 +246,8 @@ export function ReversibleEmbedModule({ onComplete }: Props) {
             </div>
 
             <div className="grid grid-cols-3 gap-2">
-              <MetricCard label="PSNR" value={result.psnr?.toFixed(2)} unit="dB" good={result.psnr > 40} />
-              <MetricCard label="SNR" value={result.snr?.toFixed(2)} unit="dB" good={result.snr > 40} />
+              <MetricCard label="PSNR" value={result.psnr?.toFixed(2)} unit="dB" good={result.psnr >= 40.95} />
+              <MetricCard label="SNR" value={result.snr?.toFixed(2)} unit="dB" good={result.snr >= 40} />
               <MetricCard label="SSIM" value={result.ssim?.toFixed(4)} good={result.ssim > 0.95} />
               <MetricCard label="NCC" value={result.ncc?.toFixed(4)} good={result.ncc > 0.9} />
               <MetricCard label="MSE" value={result.mse?.toFixed(4)} good={result.mse < 10} />
@@ -221,7 +258,7 @@ export function ReversibleEmbedModule({ onComplete }: Props) {
               <div className="grid grid-cols-2 gap-3 text-xs">
                 <div className="flex justify-between"><span className="text-muted-foreground">Alpha (α)</span><span className="text-foreground font-mono">{result.alpha?.toFixed(4)}</span></div>
                 <div className="flex justify-between"><span className="text-muted-foreground">Processing</span><span className="text-foreground font-mono">{result.processingTimeMs?.toFixed(0)}ms</span></div>
-                <div className="flex justify-between"><span className="text-muted-foreground">Compression</span><span className="text-foreground font-mono">{result.compressionRatio?.toFixed(1)}x</span></div>
+                <div className="flex justify-between"><span className="text-muted-foreground">PSNR Target</span><span className="text-foreground font-mono">≥ 40.95 dB</span></div>
                 <div className="flex justify-between"><span className="text-muted-foreground">Image Size</span><span className="text-foreground font-mono">{result.dimensions?.width}×{result.dimensions?.height}</span></div>
               </div>
             </div>
