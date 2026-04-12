@@ -29,13 +29,21 @@ const Index = () => {
       <header className="border-b border-border/50 bg-card/40 backdrop-blur-xl sticky top-0 z-50">
         <div className="container mx-auto px-4 py-3 flex items-center justify-between">
           <div className="flex items-center gap-3">
-            <div className="relative">
-                <img src="vignan.png" alt="logo" className="h-6 w-6 object-contain"/>
-              <div className="absolute -top-1 -right-1 w-3 h-3 bg-accent rounded-full animate-pulse" />
-            </div>
+  <div className="relative flex items-center">
+    <img 
+      src="/vignan.png" 
+      alt="logo"
+      className="h-8 w-auto object-contain"
+    />
+
+    {/* small status dot (optional) */}
+    <div className="absolute -top-1 -right-1 w-2.5 h-2.5 bg-accent rounded-full animate-pulse" />
+  </div>
+
+  <div></div>
             <div>
               <h1 className="text-sm font-bold font-heading text-foreground tracking-tight">
-                Hybrid<span className="gradient-text">Watermarking</span>System
+                Hybrid <span className="gradient-text"> Watermarking</span> System
               </h1>
               <p className="text-[10px] uppercase tracking-[0.25em] text-muted-foreground">
                 DWT • SVD • LSB • Genetic Algorithm
