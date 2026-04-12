@@ -14,6 +14,10 @@ export interface ShareablePayloadResult {
   watermark: ShareableRecoveredImage;
 }
 
+function toArrayBuffer(bytes: Uint8Array): ArrayBuffer {
+  return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer;
+}
+
 function createLengthBlock(originalLength: number, watermarkLength: number, metaLength: number): Uint8Array {
   const buffer = new ArrayBuffer(12);
   const view = new DataView(buffer);
@@ -60,7 +64,7 @@ export async function createShareableWatermarkedBlob(
 
   const lengthBlock = createLengthBlock(originalBytes.byteLength, watermarkBytes.byteLength, metadata.length);
   const blob = new Blob(
-    [pngBlob, originalBytes, watermarkBytes, metadata, lengthBlock, MAGIC],
+    [pngBlob, originalBytes, watermarkBytes, toArrayBuffer(metadata), toArrayBuffer(lengthBlock), toArrayBuffer(MAGIC)],
     { type: "image/png" }
   );
 

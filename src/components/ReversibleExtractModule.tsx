@@ -12,6 +12,10 @@ interface RecoveredAsset {
   name: string;
 }
 
+function toArrayBuffer(bytes: Uint8Array): ArrayBuffer {
+  return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer;
+}
+
 export function ReversibleExtractModule() {
   const [watermarkedFile, setWatermarkedFile] = useState<File | null>(null);
   const [watermarkedPreview, setWatermarkedPreview] = useState<string | null>(null);
@@ -54,8 +58,8 @@ export function ReversibleExtractModule() {
       const packagedPayload = await extractShareablePayload(watermarkedFile);
 
       if (packagedPayload) {
-        const originalUrl = URL.createObjectURL(new Blob([packagedPayload.original.bytes], { type: packagedPayload.original.mimeType }));
-        const watermarkUrl = URL.createObjectURL(new Blob([packagedPayload.watermark.bytes], { type: packagedPayload.watermark.mimeType }));
+        const originalUrl = URL.createObjectURL(new Blob([toArrayBuffer(packagedPayload.original.bytes)], { type: packagedPayload.original.mimeType }));
+        const watermarkUrl = URL.createObjectURL(new Blob([toArrayBuffer(packagedPayload.watermark.bytes)], { type: packagedPayload.watermark.mimeType }));
         setRecoveredOrigPreview(originalUrl);
         setExtractedWmPreview(watermarkUrl);
         setRecoveredOrigDownload({ url: originalUrl, name: packagedPayload.original.fileName });
