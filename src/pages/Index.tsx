@@ -33,7 +33,7 @@ const Index = () => {
     <img 
       src="/vignan.png" 
       alt="logo"
-      className="h-auto w-auto object-contain"
+      className="h-10 w-auto object-contain"
     />
 
     {/* small status dot (optional) */}
