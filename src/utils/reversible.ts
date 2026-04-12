@@ -203,18 +203,27 @@ export function reversibleEmbed(
 
   // Compress & store via LSB (2 bits per channel for more capacity)
   const capacity2bit = Math.floor((w * h * 3 * 2) / 8);
-  // Determine thumbnail size that fits
-  let thumbSize = 128;
-  while (thumbSize > 16) {
-    const testOrig = compressImageData(coverImageData, thumbSize);
-    const testWm = compressImageData(watermarkImageData, thumbSize);
-    const totalPayload = 2 + 4 + testOrig.length + 4 + testWm.length;
+  // JPEG compression is ~10-20x more efficient than raw RGB
+  // Try progressively larger thumbnails and higher quality
+  let thumbSize = 512;
+  let jpegQuality = 0.92;
+  let compressedOriginal: number[] = [];
+  let compressedWatermark: number[] = [];
+  
+  // Find the best quality that fits in the LSB capacity
+  while (thumbSize >= 64) {
+    compressedOriginal = compressImageDataJPEG(coverImageData, thumbSize, jpegQuality);
+    compressedWatermark = compressImageDataJPEG(watermarkImageData, thumbSize, jpegQuality);
+    const totalPayload = 2 + 4 + compressedOriginal.length + 4 + compressedWatermark.length;
     if (totalPayload < capacity2bit * 0.85) break;
-    thumbSize -= 16;
+    // Try lower quality first, then smaller size
+    if (jpegQuality > 0.6) {
+      jpegQuality -= 0.1;
+    } else {
+      jpegQuality = 0.92;
+      thumbSize -= 64;
+    }
   }
-
-  const compressedOriginal = compressImageData(coverImageData, thumbSize);
-  const compressedWatermark = compressImageData(watermarkImageData, thumbSize);
 
   const alphaInt = Math.round(alpha * 100000);
   const payload: number[] = [
@@ -271,7 +280,7 @@ export interface BlindExtractResult {
   processingTimeMs: number;
 }
 
-export function blindExtract(watermarkedImageData: ImageData): BlindExtractResult {
+export async function blindExtract(watermarkedImageData: ImageData): Promise<BlindExtractResult> {
   const startTime = performance.now();
   const pixels = watermarkedImageData.data;
 
@@ -293,9 +302,14 @@ export function blindExtract(watermarkedImageData: ImageData): BlindExtractResul
     (payload[wmLenOffset + 2] << 8) | payload[wmLenOffset + 3];
   const wmData = payload.slice(wmLenOffset + 4, wmLenOffset + 4 + wmLen);
 
+  const [recoveredOriginal, extractedWatermark] = await Promise.all([
+    decompressImageDataJPEG(origData),
+    decompressImageDataJPEG(wmData),
+  ]);
+
   return {
-    recoveredOriginal: decompressImageData(origData),
-    extractedWatermark: decompressImageData(wmData),
+    recoveredOriginal,
+    extractedWatermark,
     alpha,
     processingTimeMs: performance.now() - startTime,
   };
