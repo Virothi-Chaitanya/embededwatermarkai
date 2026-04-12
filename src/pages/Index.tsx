@@ -30,14 +30,12 @@ const Index = () => {
         <div className="container mx-auto px-4 py-3 flex items-center justify-between">
           <div className="flex items-center gap-3">
             <div className="relative">
-              <div className="p-2.5 rounded-xl bg-primary/10 border border-primary/20 animate-pulse-glow">
                 <img src="vignan.png" alt="logo" className="h-6 w-6 object-contain"/>
-              </div>
               <div className="absolute -top-1 -right-1 w-3 h-3 bg-accent rounded-full animate-pulse" />
             </div>
             <div>
               <h1 className="text-sm font-bold font-heading text-foreground tracking-tight">
-                Resilient <span className="gradient-text">Hybrid DWT-SVD</span> Watermarking Framework
+                Hybrid<span className="gradient-text">Watermarking</span>System
               </h1>
               <p className="text-[10px] uppercase tracking-[0.25em] text-muted-foreground">
                 DWT • SVD • LSB • Genetic Algorithm
