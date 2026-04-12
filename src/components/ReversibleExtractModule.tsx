@@ -27,7 +27,7 @@ export function ReversibleExtractModule() {
       setProgress("Decoding hidden data (LSB extraction)...");
       await new Promise(r => setTimeout(r, 30));
 
-      const result = await runAsync(() => blindExtract(wmData));
+      const result = await blindExtract(wmData);
 
       if (result.recoveredOriginal) {
         setRecoveredOrigPreview(imageDataToDataURL(result.recoveredOriginal));
