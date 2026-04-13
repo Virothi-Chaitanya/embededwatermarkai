@@ -5,7 +5,7 @@ import { Button } from "@/components/ui/button";
 import { ImageUpload } from "./ImageUpload";
 import { loadImageFromFile, imageDataToDataURL } from "@/utils/imageUtils";
 import { reversibleEmbed, gaOptimizeAsync } from "@/utils/reversible";
-import { runAsync } from "@/utils/processing";
+
 import { Slider } from "@/components/ui/slider";
 import { Label } from "@/components/ui/label";
 import { Progress } from "@/components/ui/progress";
@@ -54,15 +54,11 @@ export function ReversibleEmbedModule({ onComplete }: Props) {
     setProgress("Loading images...");
     try {
       const [coverData, wmData] = await Promise.all([loadImageFromFile(coverFile), loadImageFromFile(wmFile)]);
-      setProgress("Embedding watermark (DWT-SVD)...");
-      await new Promise(r => setTimeout(r, 10));
-      const embedResult = await new Promise<any>((resolve, reject) => {
-        setTimeout(() => {
-          try { resolve(reversibleEmbed(coverData, wmData, alpha, 128)); }
-          catch (e) { reject(e); }
-        }, 20);
-      });
-      setProgress("Packing exact-share PNG...");
+      setProgress("Embedding watermark...");
+      await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+      const embedResult = reversibleEmbed(coverData, wmData, alpha, 64);
+      setProgress("Preparing shareable PNG...");
+      await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
       const shareable = await createShareableWatermarkedBlob(embedResult.watermarkedImageData, coverFile, wmFile, embedResult.alpha);
       const nextDownloadUrl = URL.createObjectURL(shareable.blob);
       setDownloadUrl((current) => {
