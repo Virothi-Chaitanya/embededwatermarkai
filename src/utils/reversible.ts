@@ -7,9 +7,9 @@ import { dwt2Level, idwt2Level } from "./dwt";
 import { svd, svdReconstruct } from "./svd";
 import { resizeGray, resizeImageData, calculatePSNR, calculateSSIM, calculateNCC, calculateMSE, clampImage } from "./imageUtils";
 
-const TARGET_PSNR_DB = 40.95;
-const MIN_ALPHA = 0.001;
-const QUALITY_RETRY_ATTEMPTS = 6;
+const TARGET_PSNR_DB = 41.0;
+const MIN_ALPHA = 0.0001;
+const QUALITY_RETRY_ATTEMPTS = 12;
 
 // ========== LSB ENCODING / DECODING ==========
 
@@ -162,7 +162,7 @@ function simulateEmbed(
     }
   }
 
-  const procSize = Math.min(resolution, Math.min(w, h));
+  const procSize = Math.min(resolution, Math.min(w, h), 128); // Cap at 128 for speed
   const lumSmall = resizeGray(lumGray, procSize, procSize);
 
   const wmGray: number[][] = [];
@@ -268,7 +268,7 @@ interface GAIndividual {
 
 function createInitialPopulation(popSize: number): GAIndividual[] {
   return Array.from({ length: popSize }, () => ({
-    alpha: 0.001 + Math.random() * 0.012,
+    alpha: 0.0001 + Math.random() * 0.005,
     fitness: 0,
     psnr: 0,
     ssim: 0,
@@ -278,10 +278,10 @@ function createInitialPopulation(popSize: number): GAIndividual[] {
 }
 
 function evaluateGAIndividual(ind: GAIndividual, coverImageData: ImageData, watermarkImageData: ImageData): GAIndividual {
-  const result = reversibleEmbed(coverImageData, watermarkImageData, ind.alpha, 128);
+  const result = reversibleEmbed(coverImageData, watermarkImageData, ind.alpha, 64);
   const psnrScore = Math.min(result.psnr / TARGET_PSNR_DB, 1.15);
   const snrScore = Math.min(result.snr / 45, 1.1);
-  const psnrPenalty = result.psnr < TARGET_PSNR_DB ? (TARGET_PSNR_DB - result.psnr) / TARGET_PSNR_DB : 0;
+  const psnrPenalty = result.psnr < TARGET_PSNR_DB ? (TARGET_PSNR_DB - result.psnr) * 0.05 : 0;
   const fitness = 0.45 * psnrScore + 0.2 * result.ssim + 0.2 * result.ncc + 0.15 * snrScore - psnrPenalty;
   return { ...ind, fitness, psnr: result.psnr, ssim: result.ssim, ncc: result.ncc, snr: result.snr };
 }
@@ -294,7 +294,7 @@ function evolvePopulation(pop: GAIndividual[], popSize: number): GAIndividual[] 
     const p2 = survivors[Math.floor(Math.random() * survivors.length)];
     let childAlpha = (p1.alpha + p2.alpha) / 2;
     if (Math.random() < 0.25) childAlpha += (Math.random() - 0.5) * 0.003;
-    childAlpha = Math.max(MIN_ALPHA, Math.min(0.02, childAlpha));
+    childAlpha = Math.max(MIN_ALPHA, Math.min(0.005, childAlpha));
     newPop.push({ alpha: childAlpha, fitness: 0, psnr: 0, ssim: 0, ncc: 0, snr: 0 });
   }
   return newPop;
@@ -303,16 +303,22 @@ function evolvePopulation(pop: GAIndividual[], popSize: number): GAIndividual[] 
 export function reversibleEmbed(
   coverImageData: ImageData,
   watermarkImageData: ImageData,
-  alpha: number = 0.01,
-  resolution: number = 512
+  alpha: number = 0.005,
+  resolution: number = 128
 ): ReversibleEmbedResult {
   const startTime = performance.now();
   let nextAlpha = Math.max(MIN_ALPHA, alpha);
   let bestResult = simulateEmbed(coverImageData, watermarkImageData, nextAlpha, resolution);
 
+  // Aggressively reduce alpha until PSNR > 41 dB
   for (let attempt = 1; attempt < QUALITY_RETRY_ATTEMPTS && bestResult.psnr < TARGET_PSNR_DB && nextAlpha > MIN_ALPHA; attempt++) {
-    nextAlpha = Math.max(MIN_ALPHA, nextAlpha * 0.75);
+    nextAlpha = Math.max(MIN_ALPHA, nextAlpha * 0.5);
     bestResult = simulateEmbed(coverImageData, watermarkImageData, nextAlpha, resolution);
+  }
+
+  // Final guarantee: if still below target, use minimal alpha
+  if (bestResult.psnr < TARGET_PSNR_DB) {
+    bestResult = simulateEmbed(coverImageData, watermarkImageData, MIN_ALPHA, resolution);
   }
 
   return {
