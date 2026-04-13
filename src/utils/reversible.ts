@@ -7,9 +7,11 @@ import { dwt2Level, idwt2Level } from "./dwt";
 import { svd, svdReconstruct } from "./svd";
 import { resizeGray, resizeImageData, calculatePSNR, calculateSSIM, calculateNCC, calculateMSE, clampImage } from "./imageUtils";
 
-const TARGET_PSNR_DB = 41.0;
-const MIN_ALPHA = 0.0001;
-const QUALITY_RETRY_ATTEMPTS = 12;
+const TARGET_PSNR_MIN = 40.0;
+const TARGET_PSNR_MAX = 50.0;
+const MIN_ALPHA = 0.0005;
+const MAX_ALPHA = 0.05;
+const QUALITY_RETRY_ATTEMPTS = 8;
 
 // ========== LSB ENCODING / DECODING ==========
 
@@ -151,11 +153,9 @@ function simulateEmbed(
   const w = coverImageData.width;
   const h = coverImageData.height;
 
-  // High-fidelity mode: preserve the visible image exactly and rely on the
-  // packaged shareable payload for exact recovery of both source images.
   const resultPixels = new Uint8ClampedArray(coverImageData.data);
-  const resultImageData = new ImageData(resultPixels, w, h);
 
+  // Build luminance
   const lumGray: number[][] = [];
   for (let y = 0; y < h; y++) {
     lumGray[y] = [];
@@ -165,19 +165,76 @@ function simulateEmbed(
     }
   }
 
-  const resultLum = lumGray;
-  const measuredPSNR = calculatePSNR(lumGray, resultLum);
-  const measuredSNR = calculateSNR(lumGray, resultLum);
-  const psnr = Number.isFinite(measuredPSNR) ? measuredPSNR : 99.99;
-  const snr = Number.isFinite(measuredSNR) ? measuredSNR : 99.99;
+  // Actual DWT-SVD embedding on small resolution for speed
+  const procSize = Math.min(resolution, Math.min(w, h), 128);
+  const lumSmall = resizeGray(lumGray, procSize, procSize);
+
+  const wmGray: number[][] = [];
+  const wmW = watermarkImageData.width;
+  const wmH = watermarkImageData.height;
+  for (let y = 0; y < wmH; y++) {
+    wmGray[y] = [];
+    for (let x = 0; x < wmW; x++) {
+      const i = (y * wmW + x) * 4;
+      wmGray[y][x] = 0.299 * watermarkImageData.data[i] + 0.587 * watermarkImageData.data[i + 1] + 0.114 * watermarkImageData.data[i + 2];
+    }
+  }
+
+  const coeffs = dwt2Level(lumSmall);
+  const ll2 = coeffs.LL2;
+  const llH = ll2.length;
+  const llW = ll2[0].length;
+  const coverSvd = svd(ll2);
+  const wmResized = resizeGray(wmGray, llW, llH);
+  const wmSvd = svd(wmResized);
+
+  const modifiedS = coverSvd.S.map((s, i) => {
+    const sw = i < wmSvd.S.length ? wmSvd.S[i] : 0;
+    return s + alpha * sw;
+  });
+
+  coeffs.LL2 = svdReconstruct({ U: coverSvd.U, S: modifiedS, V: coverSvd.V, rows: coverSvd.rows, cols: coverSvd.cols });
+  const modifiedLum = clampImage(idwt2Level(coeffs));
+  const modLumFull = resizeGray(modifiedLum, w, h);
+
+  // Apply luminance change to RGB pixels
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      const i = (y * w + x) * 4;
+      const origLum = lumGray[y][x] || 1;
+      const newLum = modLumFull[y][x];
+      const ratio = newLum / Math.max(origLum, 1);
+      resultPixels[i] = clampByte(resultPixels[i] * ratio);
+      resultPixels[i + 1] = clampByte(resultPixels[i + 1] * ratio);
+      resultPixels[i + 2] = clampByte(resultPixels[i + 2] * ratio);
+    }
+  }
+
+  const resultImageData = new ImageData(resultPixels, w, h);
+
+  // Compute metrics on full-size luminance
+  const resultLum: number[][] = [];
+  for (let y = 0; y < h; y++) {
+    resultLum[y] = [];
+    for (let x = 0; x < w; x++) {
+      const i = (y * w + x) * 4;
+      resultLum[y][x] = 0.299 * resultPixels[i] + 0.587 * resultPixels[i + 1] + 0.114 * resultPixels[i + 2];
+    }
+  }
+
+  const psnr = calculatePSNR(lumGray, resultLum);
+  const ssim = calculateSSIM(lumGray, resultLum);
+  const mse = calculateMSE(lumGray, resultLum);
+  const ncc = calculateNCC(lumGray, resultLum);
+  const snr = calculateSNR(lumGray, resultLum);
 
   return {
     watermarkedImageData: resultImageData,
-    psnr,
-    ssim: 1,
-    mse: 0,
-    ncc: 1,
-    snr,
+    psnr: Number.isFinite(psnr) ? psnr : 99.99,
+    ssim,
+    mse,
+    ncc,
+    snr: Number.isFinite(snr) ? snr : 99.99,
     alpha,
     processingTimeMs: 0,
     dimensions: { width: w, height: h },
@@ -228,7 +285,7 @@ function createInitialPopulation(popSize: number): GAIndividual[] {
 
 function evaluateGAIndividual(ind: GAIndividual, coverImageData: ImageData, watermarkImageData: ImageData): GAIndividual {
   const result = reversibleEmbed(coverImageData, watermarkImageData, ind.alpha, 64);
-  const psnrScore = Math.min(result.psnr / TARGET_PSNR_DB, 1.15);
+  const psnrScore = Math.min(result.psnr / TARGET_PSNR_MIN, 1.15);
   const snrScore = Math.min(result.snr / 45, 1.1);
   const alphaPenalty = ind.alpha * 50;
   const fitness = 0.45 * psnrScore + 0.2 * result.ssim + 0.2 * result.ncc + 0.15 * snrScore - alphaPenalty;
@@ -259,15 +316,16 @@ export function reversibleEmbed(
   let nextAlpha = Math.max(MIN_ALPHA, alpha);
   let bestResult = simulateEmbed(coverImageData, watermarkImageData, nextAlpha, resolution);
 
-  // Aggressively reduce alpha until PSNR > 41 dB
-  for (let attempt = 1; attempt < QUALITY_RETRY_ATTEMPTS && bestResult.psnr < TARGET_PSNR_DB && nextAlpha > MIN_ALPHA; attempt++) {
-    nextAlpha = Math.max(MIN_ALPHA, nextAlpha * 0.5);
+  // Auto-tune alpha: reduce until PSNR is in 40-50 range, increase if too high
+  for (let attempt = 1; attempt < QUALITY_RETRY_ATTEMPTS; attempt++) {
+    if (bestResult.psnr < TARGET_PSNR_MIN && nextAlpha > MIN_ALPHA) {
+      nextAlpha = Math.max(MIN_ALPHA, nextAlpha * 0.5);
+    } else if (bestResult.psnr > TARGET_PSNR_MAX && nextAlpha < MAX_ALPHA) {
+      nextAlpha = Math.min(MAX_ALPHA, nextAlpha * 1.8);
+    } else {
+      break;
+    }
     bestResult = simulateEmbed(coverImageData, watermarkImageData, nextAlpha, resolution);
-  }
-
-  // Final guarantee: if still below target, use minimal alpha
-  if (bestResult.psnr < TARGET_PSNR_DB) {
-    bestResult = simulateEmbed(coverImageData, watermarkImageData, MIN_ALPHA, resolution);
   }
 
   return {

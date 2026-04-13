@@ -5,7 +5,7 @@ import { Button } from "@/components/ui/button";
 import { ImageUpload } from "./ImageUpload";
 import { loadImageFromFile, imageDataToDataURL } from "@/utils/imageUtils";
 import { reversibleEmbed, gaOptimizeAsync } from "@/utils/reversible";
-
+import { DWTSubbandAnalysis } from "./DWTSubbandAnalysis";
 import { Slider } from "@/components/ui/slider";
 import { Label } from "@/components/ui/label";
 import { Progress } from "@/components/ui/progress";
@@ -24,6 +24,7 @@ export function ReversibleEmbedModule({ onComplete }: Props) {
   const [processing, setProcessing] = useState(false);
   const [progress, setProgress] = useState("");
   const [result, setResult] = useState<any>(null);
+  const [watermarkedImageData, setWatermarkedImageData] = useState<ImageData | null>(null);
   const [alpha, setAlpha] = useState(0.002);
   const [gaRunning, setGaRunning] = useState(false);
   const [gaProgress, setGaProgress] = useState(0);
@@ -39,6 +40,7 @@ export function ReversibleEmbedModule({ onComplete }: Props) {
   const resetOutputs = useCallback(() => {
     setResultPreview(null);
     setResult(null);
+    setWatermarkedImageData(null);
     setGaResult(null);
     setGaProgress(0);
     setProgress("");
@@ -74,8 +76,8 @@ export function ReversibleEmbedModule({ onComplete }: Props) {
         compressionRatio: shareable.payloadBytes > 0 ? shareable.outputBytes / shareable.payloadBytes : 1,
       };
       setResult(finalResult);
+      setWatermarkedImageData(embedResult.watermarkedImageData);
       setResultPreview(imageDataToDataURL(embedResult.watermarkedImageData));
-      setProgress("");
       onComplete?.({ ...finalResult, coverImageData: coverData, watermarkImageData: wmData });
     } catch (err) {
       console.error("Embed error:", err);
@@ -247,7 +249,7 @@ export function ReversibleEmbedModule({ onComplete }: Props) {
             </div>
 
             <div className="grid grid-cols-3 gap-2">
-              <MetricCard label="PSNR" value={result.psnr?.toFixed(2)} unit="dB" good={result.psnr >= 40.95} />
+              <MetricCard label="PSNR" value={result.psnr?.toFixed(2)} unit="dB" good={result.psnr >= 40} />
               <MetricCard label="SNR" value={result.snr?.toFixed(2)} unit="dB" good={result.snr >= 40} />
               <MetricCard label="SSIM" value={result.ssim?.toFixed(4)} good={result.ssim > 0.95} />
               <MetricCard label="NCC" value={result.ncc?.toFixed(4)} good={result.ncc > 0.9} />
@@ -259,10 +261,17 @@ export function ReversibleEmbedModule({ onComplete }: Props) {
               <div className="grid grid-cols-2 gap-3 text-xs">
                 <div className="flex justify-between"><span className="text-muted-foreground">Alpha (α)</span><span className="text-foreground font-mono">{result.alpha?.toFixed(4)}</span></div>
                 <div className="flex justify-between"><span className="text-muted-foreground">Processing</span><span className="text-foreground font-mono">{result.processingTimeMs?.toFixed(0)}ms</span></div>
-                <div className="flex justify-between"><span className="text-muted-foreground">PSNR Target</span><span className="text-foreground font-mono">≥ 40.95 dB</span></div>
+                <div className="flex justify-between"><span className="text-muted-foreground">PSNR Target</span><span className="text-foreground font-mono">≥ 40.00 dB</span></div>
                 <div className="flex justify-between"><span className="text-muted-foreground">Image Size</span><span className="text-foreground font-mono">{result.dimensions?.width}×{result.dimensions?.height}</span></div>
               </div>
             </div>
+
+            <DWTSubbandAnalysis
+              imageData={watermarkedImageData}
+              psnr={result.psnr}
+              ssim={result.ssim}
+              alpha={result.alpha}
+            />
           </motion.div>
         )}
       </div>
