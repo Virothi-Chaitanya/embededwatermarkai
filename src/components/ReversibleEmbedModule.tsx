@@ -24,7 +24,7 @@ export function ReversibleEmbedModule({ onComplete }: Props) {
   const [processing, setProcessing] = useState(false);
   const [progress, setProgress] = useState("");
   const [result, setResult] = useState<any>(null);
-  const [alpha, setAlpha] = useState(0.005);
+  const [alpha, setAlpha] = useState(0.002);
   const [gaRunning, setGaRunning] = useState(false);
   const [gaProgress, setGaProgress] = useState(0);
   const [gaResult, setGaResult] = useState<any>(null);
@@ -55,8 +55,13 @@ export function ReversibleEmbedModule({ onComplete }: Props) {
     try {
       const [coverData, wmData] = await Promise.all([loadImageFromFile(coverFile), loadImageFromFile(wmFile)]);
       setProgress("Embedding watermark (DWT-SVD)...");
-      await new Promise(r => setTimeout(r, 20));
-      const embedResult = await runAsync(() => reversibleEmbed(coverData, wmData, alpha));
+      await new Promise(r => setTimeout(r, 10));
+      const embedResult = await new Promise<any>((resolve, reject) => {
+        setTimeout(() => {
+          try { resolve(reversibleEmbed(coverData, wmData, alpha, 128)); }
+          catch (e) { reject(e); }
+        }, 20);
+      });
       setProgress("Packing exact-share PNG...");
       const shareable = await createShareableWatermarkedBlob(embedResult.watermarkedImageData, coverFile, wmFile, embedResult.alpha);
       const nextDownloadUrl = URL.createObjectURL(shareable.blob);
@@ -90,7 +95,7 @@ export function ReversibleEmbedModule({ onComplete }: Props) {
     setGaProgress(0);
     try {
       const [coverData, wmData] = await Promise.all([loadImageFromFile(coverFile), loadImageFromFile(wmFile)]);
-      const ga = await gaOptimizeAsync(coverData, wmData, 10, 10, (gen, total) => {
+      const ga = await gaOptimizeAsync(coverData, wmData, 8, 8, (gen, total) => {
         setGaProgress(Math.round((gen / total) * 100));
       });
       setGaResult(ga);
