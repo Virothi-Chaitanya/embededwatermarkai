@@ -285,7 +285,7 @@ function createInitialPopulation(popSize: number): GAIndividual[] {
 
 function evaluateGAIndividual(ind: GAIndividual, coverImageData: ImageData, watermarkImageData: ImageData): GAIndividual {
   const result = reversibleEmbed(coverImageData, watermarkImageData, ind.alpha, 64);
-  const psnrScore = Math.min(result.psnr / TARGET_PSNR_DB, 1.15);
+  const psnrScore = Math.min(result.psnr / TARGET_PSNR_MIN, 1.15);
   const snrScore = Math.min(result.snr / 45, 1.1);
   const alphaPenalty = ind.alpha * 50;
   const fitness = 0.45 * psnrScore + 0.2 * result.ssim + 0.2 * result.ncc + 0.15 * snrScore - alphaPenalty;
@@ -316,15 +316,16 @@ export function reversibleEmbed(
   let nextAlpha = Math.max(MIN_ALPHA, alpha);
   let bestResult = simulateEmbed(coverImageData, watermarkImageData, nextAlpha, resolution);
 
-  // Aggressively reduce alpha until PSNR > 41 dB
-  for (let attempt = 1; attempt < QUALITY_RETRY_ATTEMPTS && bestResult.psnr < TARGET_PSNR_DB && nextAlpha > MIN_ALPHA; attempt++) {
-    nextAlpha = Math.max(MIN_ALPHA, nextAlpha * 0.5);
+  // Auto-tune alpha: reduce until PSNR is in 40-50 range, increase if too high
+  for (let attempt = 1; attempt < QUALITY_RETRY_ATTEMPTS; attempt++) {
+    if (bestResult.psnr < TARGET_PSNR_MIN && nextAlpha > MIN_ALPHA) {
+      nextAlpha = Math.max(MIN_ALPHA, nextAlpha * 0.5);
+    } else if (bestResult.psnr > TARGET_PSNR_MAX && nextAlpha < MAX_ALPHA) {
+      nextAlpha = Math.min(MAX_ALPHA, nextAlpha * 1.8);
+    } else {
+      break;
+    }
     bestResult = simulateEmbed(coverImageData, watermarkImageData, nextAlpha, resolution);
-  }
-
-  // Final guarantee: if still below target, use minimal alpha
-  if (bestResult.psnr < TARGET_PSNR_DB) {
-    bestResult = simulateEmbed(coverImageData, watermarkImageData, MIN_ALPHA, resolution);
   }
 
   return {
