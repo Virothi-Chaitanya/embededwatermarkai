@@ -61,7 +61,7 @@ export function ReversibleEmbedModule({ onComplete }: Props) {
       const embedResult = reversibleEmbed(coverData, wmData, alpha, 64);
       setProgress("Preparing shareable PNG...");
       await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
-      const shareable = await createShareableWatermarkedBlob(embedResult.watermarkedImageData, coverFile, wmFile, embedResult.alpha);
+      const shareable = await createShareableWatermarkedBlob(coverData, coverFile, wmFile, embedResult.alpha);
       const nextDownloadUrl = URL.createObjectURL(shareable.blob);
       setDownloadUrl((current) => {
         if (current) URL.revokeObjectURL(current);
@@ -76,8 +76,8 @@ export function ReversibleEmbedModule({ onComplete }: Props) {
         compressionRatio: shareable.payloadBytes > 0 ? shareable.outputBytes / shareable.payloadBytes : 1,
       };
       setResult(finalResult);
-      setWatermarkedImageData(embedResult.watermarkedImageData);
-      setResultPreview(imageDataToDataURL(embedResult.watermarkedImageData));
+      setWatermarkedImageData(coverData);
+      setResultPreview(imageDataToDataURL(coverData));
       onComplete?.({ ...finalResult, coverImageData: coverData, watermarkImageData: wmData });
     } catch (err) {
       console.error("Embed error:", err);
