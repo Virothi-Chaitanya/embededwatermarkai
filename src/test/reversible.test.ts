@@ -1,6 +1,20 @@
 import { describe, expect, it } from "vitest";
 import { reversibleEmbed } from "@/utils/reversible";
 
+class TestImageData {
+  data: Uint8ClampedArray;
+  width: number;
+  height: number;
+
+  constructor(data: Uint8ClampedArray, width: number, height: number) {
+    this.data = data;
+    this.width = width;
+    this.height = height;
+  }
+}
+
+globalThis.ImageData = TestImageData as typeof ImageData;
+
 function createGradientImage(width: number, height: number): ImageData {
   const data = new Uint8ClampedArray(width * height * 4);
   for (let y = 0; y < height; y++) {

@@ -3,9 +3,9 @@
  * Optimized for PSNR > 40 dB with full color fidelity
  */
 
-import { dwt2Level, idwt2Level } from "./dwt";
+import { dwt2Level } from "./dwt";
 import { svd, svdReconstruct } from "./svd";
-import { resizeGray, resizeImageData, calculatePSNR, calculateSSIM, calculateNCC, calculateMSE, clampImage } from "./imageUtils";
+import { resizeGray, resizeImageData, calculatePSNR, calculateSSIM, calculateNCC, calculateMSE } from "./imageUtils";
 
 const TARGET_PSNR_MIN = 40.0;
 const TARGET_PSNR_MAX = 50.0;
@@ -166,8 +166,6 @@ function simulateEmbed(
 
   // Actual DWT-SVD embedding on small resolution for speed
   const procSize = Math.min(resolution, Math.min(w, h), 128);
-  const lumSmall = resizeGray(lumGray, procSize, procSize);
-
   const wmGray: number[][] = [];
   const wmW = watermarkImageData.width;
   const wmH = watermarkImageData.height;
