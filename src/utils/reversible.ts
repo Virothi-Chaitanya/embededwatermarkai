@@ -197,7 +197,7 @@ function simulateEmbed(
   }
 
   const wmRms = Math.sqrt(wmEnergy / Math.max(w * h, 1)) || 1;
-  const targetPSNR = Math.max(TARGET_PSNR_MIN + 0.2, Math.min(TARGET_PSNR_MAX - 0.2, 48 - alpha * 1600));
+  const targetPSNR = Math.max(TARGET_PSNR_MIN + 0.6, Math.min(TARGET_PSNR_MAX - 0.2, 49 - alpha * 1500));
   const targetRMSE = 255 / Math.pow(10, targetPSNR / 20);
   const strength = targetRMSE / wmRms;
   const modLumFull: number[][] = [];
