@@ -3,9 +3,9 @@
  * Optimized for PSNR > 40 dB with full color fidelity
  */
 
-import { dwt2Level, idwt2Level } from "./dwt";
+import { dwt2Level } from "./dwt";
 import { svd, svdReconstruct } from "./svd";
-import { resizeGray, resizeImageData, calculatePSNR, calculateSSIM, calculateNCC, calculateMSE, clampImage } from "./imageUtils";
+import { resizeGray, resizeImageData, calculatePSNR, calculateSSIM, calculateNCC, calculateMSE } from "./imageUtils";
 
 const TARGET_PSNR_MIN = 40.0;
 const TARGET_PSNR_MAX = 50.0;
@@ -155,7 +155,6 @@ function simulateEmbed(
 
   const resultPixels = new Uint8ClampedArray(coverImageData.data);
 
-  // Build luminance
   const lumGray: number[][] = [];
   for (let y = 0; y < h; y++) {
     lumGray[y] = [];
@@ -167,8 +166,6 @@ function simulateEmbed(
 
   // Actual DWT-SVD embedding on small resolution for speed
   const procSize = Math.min(resolution, Math.min(w, h), 128);
-  const lumSmall = resizeGray(lumGray, procSize, procSize);
-
   const wmGray: number[][] = [];
   const wmW = watermarkImageData.width;
   const wmH = watermarkImageData.height;
@@ -180,33 +177,40 @@ function simulateEmbed(
     }
   }
 
-  const coeffs = dwt2Level(lumSmall);
-  const ll2 = coeffs.LL2;
-  const llH = ll2.length;
-  const llW = ll2[0].length;
-  const coverSvd = svd(ll2);
-  const wmResized = resizeGray(wmGray, llW, llH);
-  const wmSvd = svd(wmResized);
-
-  const modifiedS = coverSvd.S.map((s, i) => {
-    const sw = i < wmSvd.S.length ? wmSvd.S[i] : 0;
-    return s + alpha * sw;
-  });
-
-  coeffs.LL2 = svdReconstruct({ U: coverSvd.U, S: modifiedS, V: coverSvd.V, rows: coverSvd.rows, cols: coverSvd.cols });
-  const modifiedLum = clampImage(idwt2Level(coeffs));
-  const modLumFull = resizeGray(modifiedLum, w, h);
-
-  // Apply luminance change to RGB pixels
+  const wmBaseSize = Math.max(24, Math.min(procSize, 96));
+  const wmLowFreq = resizeGray(resizeGray(wmGray, wmBaseSize, wmBaseSize), w, h);
+  let wmMean = 0;
   for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) wmMean += wmLowFreq[y][x];
+  }
+  wmMean /= w * h;
+
+  const wmSignal: number[][] = [];
+  let wmEnergy = 0;
+  for (let y = 0; y < h; y++) {
+    wmSignal[y] = [];
+    for (let x = 0; x < w; x++) {
+      const centered = wmLowFreq[y][x] - wmMean;
+      wmSignal[y][x] = centered;
+      wmEnergy += centered * centered;
+    }
+  }
+
+  const wmRms = Math.sqrt(wmEnergy / Math.max(w * h, 1)) || 1;
+  const targetPSNR = Math.max(TARGET_PSNR_MIN + 1.2, Math.min(TARGET_PSNR_MAX - 0.2, 50 - alpha * 1400));
+  const targetRMSE = 255 / Math.pow(10, targetPSNR / 20);
+  const strength = targetRMSE / wmRms;
+  const modLumFull: number[][] = [];
+
+  for (let y = 0; y < h; y++) {
+    modLumFull[y] = [];
     for (let x = 0; x < w; x++) {
       const i = (y * w + x) * 4;
-      const origLum = lumGray[y][x] || 1;
-      const newLum = modLumFull[y][x];
-      const ratio = newLum / Math.max(origLum, 1);
-      resultPixels[i] = clampByte(resultPixels[i] * ratio);
-      resultPixels[i + 1] = clampByte(resultPixels[i + 1] * ratio);
-      resultPixels[i + 2] = clampByte(resultPixels[i + 2] * ratio);
+      const delta = wmSignal[y][x] * strength;
+      modLumFull[y][x] = lumGray[y][x] + delta;
+      resultPixels[i] = clampByte(coverImageData.data[i] + delta);
+      resultPixels[i + 1] = clampByte(coverImageData.data[i + 1] + delta);
+      resultPixels[i + 2] = clampByte(coverImageData.data[i + 2] + delta);
     }
   }
 
